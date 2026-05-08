@@ -39,13 +39,23 @@ impl fmt::Display for Error {
             Error::NoValidHeader => write!(f, "no valid VHDX header found in either slot"),
             Error::NoValidRegionTable => write!(f, "no valid VHDX region table found"),
             Error::BadMetadata(s) => write!(f, "bad metadata region: {s}"),
-            Error::BadChecksum { expected, found, what } => {
-                write!(f, "{what} CRC-32C mismatch: expected {expected:#x}, found {found:#x}")
+            Error::BadChecksum {
+                expected,
+                found,
+                what,
+            } => {
+                write!(
+                    f,
+                    "{what} CRC-32C mismatch: expected {expected:#x}, found {found:#x}"
+                )
             }
             Error::Corrupt(s) => write!(f, "corrupt VHDX: {s}"),
             Error::Unsupported(s) => write!(f, "unsupported VHDX feature: {s}"),
             Error::OutOfBounds { offset, len, size } => {
-                write!(f, "read [{offset}, {offset}+{len}) past virtual size {size}")
+                write!(
+                    f,
+                    "read [{offset}, {offset}+{len}) past virtual size {size}"
+                )
             }
         }
     }
