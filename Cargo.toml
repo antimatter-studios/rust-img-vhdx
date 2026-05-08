@@ -1,0 +1,28 @@
+[package]
+name = "am-img-vhdx"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Pure-Rust VHDX (Microsoft VHD's modern successor) reader. Used by Hyper-V and WSL2. Exposes a Rust API and a C ABI suitable for FFI from C/C++/Go/Swift."
+repository = "https://github.com/antimatter-studios/rust-img-vhdx"
+
+[lib]
+name = "vhdx"
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+am-fs-core = { path = "../rust-fs-core", version = "0.1" }
+# CRC-32C (Castagnoli) for VHDX header / region-table / metadata checksums.
+crc32c = "0.6"
+
+[dev-dependencies]
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
+panic = "unwind"
+
+[profile.dev]
+opt-level = 1
+panic = "unwind"
