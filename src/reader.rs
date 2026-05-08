@@ -18,7 +18,9 @@ use crate::header::{Header, HEADER1_OFFSET, HEADER2_OFFSET, HEADER_SIZE};
 use crate::metadata::{
     item_ids, read_sector_size, read_virtual_disk_size, FileParameters, MetadataTable,
 };
-use crate::region_table::{guids, RegionTable, REGION_TABLE1_OFFSET, REGION_TABLE2_OFFSET, REGION_TABLE_SIZE};
+use crate::region_table::{
+    guids, RegionTable, REGION_TABLE1_OFFSET, REGION_TABLE2_OFFSET, REGION_TABLE_SIZE,
+};
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
@@ -196,9 +198,9 @@ impl VhdxReader {
                     ));
                 }
                 PayloadState::Reserved(v) => {
-                    return Err(Error::Unsupported(
-                        Box::leak(format!("BAT entry reserved state {v}").into_boxed_str()),
-                    ));
+                    return Err(Error::Unsupported(Box::leak(
+                        format!("BAT entry reserved state {v}").into_boxed_str(),
+                    )));
                 }
                 _ => unreachable!(),
             }
