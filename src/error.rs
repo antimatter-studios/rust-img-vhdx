@@ -29,6 +29,11 @@ pub enum Error {
         len: u64,
         size: u64,
     },
+    /// Write attempted on a reader opened read-only.
+    ReadOnly,
+    /// Log replay failed mid-stream — image is in an inconsistent state
+    /// the reader cannot safely interpret.
+    LogReplay(String),
 }
 
 impl fmt::Display for Error {
@@ -57,6 +62,8 @@ impl fmt::Display for Error {
                     "read [{offset}, {offset}+{len}) past virtual size {size}"
                 )
             }
+            Error::ReadOnly => write!(f, "VHDX reader is read-only"),
+            Error::LogReplay(s) => write!(f, "VHDX log replay failed: {s}"),
         }
     }
 }

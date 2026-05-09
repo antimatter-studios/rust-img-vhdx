@@ -12,6 +12,7 @@ pub mod bat;
 pub mod capi;
 pub mod error;
 pub mod header;
+pub mod log;
 pub mod metadata;
 pub mod reader;
 pub mod region_table;
