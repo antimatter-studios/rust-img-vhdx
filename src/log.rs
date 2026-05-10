@@ -29,8 +29,8 @@
 //! - "zero": signature(4) "zero" + reserved(4) + zero_length(8) +
 //!   file_offset(8) + sequence_number(8). Replay zeros `zero_length`
 //!   bytes at `file_offset`. No paired data sector.
-//! - "desc": signature(4) "desc" + trailing_bytes(4) + leading_bytes(8)
-//!   + file_offset(8) + sequence_number(8). Paired with one 4 KiB data
+//! - "desc": signature(4) "desc" + trailing_bytes(4) + leading_bytes(8) +
+//!   file_offset(8) + sequence_number(8). Paired with one 4 KiB data
 //!   sector that — once `leading`/`trailing` patches are applied —
 //!   becomes the byte image written at `file_offset`.
 //!
@@ -139,7 +139,7 @@ fn parse_log_entry(log_bytes: &[u8], pos: usize, expected_log_guid: &[u8; 16]) -
     }
     let entry_length = read_u32_le(head, 8) as usize;
     if entry_length < LOG_SECTOR_SIZE
-        || entry_length % LOG_SECTOR_SIZE != 0
+        || !entry_length.is_multiple_of(LOG_SECTOR_SIZE)
         || pos + entry_length > log_bytes.len()
     {
         return None;
