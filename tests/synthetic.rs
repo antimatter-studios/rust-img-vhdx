@@ -244,3 +244,370 @@ fn fs_core_blockread_size_matches_virtual() {
     );
     let _ = std::fs::remove_file(&path);
 }
+
+// ---------------------------------------------------------------------------
+// Larger fixture for write + log-replay tests. The base image now carries:
+//   - a 1 MiB log region at offset 4 MiB
+//   - a multi-entry BAT (4 entries), only the first allocated
+//   - extra slack at the tail so the writer can extend past the BAT region
+//     into fresh ground when allocating new blocks
+// ---------------------------------------------------------------------------
+
+const BIG_BLOCK_SIZE: u32 = ONE_MIB as u32; // keep blocks at 1 MiB
+const BIG_BAT_ENTRIES: u64 = 4; // covers 4 MiB virtual
+const BIG_VIRTUAL_DISK_SIZE: u64 = BIG_BLOCK_SIZE as u64 * BIG_BAT_ENTRIES;
+const BIG_LOG_OFFSET: u64 = 4 * ONE_MIB;
+const BIG_LOG_LENGTH: u32 = ONE_MIB as u32;
+const BIG_METADATA_OFFSET: u64 = 5 * ONE_MIB;
+const BIG_BAT_OFFSET: u64 = 6 * ONE_MIB;
+const BIG_DATA_BLOCK0_OFFSET: u64 = 7 * ONE_MIB;
+const BIG_TOTAL_FILE_SIZE: u64 = 64 * ONE_MIB; // plenty of slack for writes
+
+/// Build a VHDX image with a real (empty) log region, a 4-entry BAT,
+/// and only the first block on disk. Used by the write-path and
+/// log-replay tests.
+fn build_big_vhdx(path: &PathBuf, block0: &[u8; BIG_BLOCK_SIZE as usize]) {
+    let mut f = File::create(path).unwrap();
+    f.set_len(BIG_TOTAL_FILE_SIZE).unwrap();
+
+    // 1. File identifier.
+    let mut id = vec![0u8; 64 * 1024];
+    id[0..8].copy_from_slice(b"vhdxfile");
+    f.write_all_at(&id, 0).unwrap();
+
+    // 2. Header 1 — sequence=1, log region declared but empty
+    //    (log_guid all-zero so the reader skips replay).
+    let mut hdr = vec![0u8; HEADER_SIZE];
+    hdr[0..4].copy_from_slice(b"head");
+    hdr[8..16].copy_from_slice(&1u64.to_le_bytes());
+    hdr[64..66].copy_from_slice(&0u16.to_le_bytes());
+    hdr[66..68].copy_from_slice(&1u16.to_le_bytes());
+    hdr[68..72].copy_from_slice(&BIG_LOG_LENGTH.to_le_bytes());
+    hdr[72..80].copy_from_slice(&BIG_LOG_OFFSET.to_le_bytes());
+    let crc = {
+        let mut tmp = hdr.clone();
+        tmp[4..8].fill(0);
+        crc32c::crc32c(&tmp)
+    };
+    hdr[4..8].copy_from_slice(&crc.to_le_bytes());
+    f.write_all_at(&hdr, HEADER1_OFFSET).unwrap();
+
+    // 3. Region table 1.
+    let bat_region_len = (BIG_BAT_ENTRIES * 8) as u32;
+    let mut rt = vec![0u8; REGION_TABLE_SIZE];
+    rt[0..4].copy_from_slice(b"regi");
+    rt[8..12].copy_from_slice(&2u32.to_le_bytes());
+    let off = 16;
+    rt[off..off + 16].copy_from_slice(&BAT_GUID);
+    rt[off + 16..off + 24].copy_from_slice(&BIG_BAT_OFFSET.to_le_bytes());
+    rt[off + 24..off + 28].copy_from_slice(&bat_region_len.to_le_bytes());
+    rt[off + 28..off + 32].copy_from_slice(&1u32.to_le_bytes());
+    let off = 16 + 32;
+    rt[off..off + 16].copy_from_slice(&METADATA_GUID);
+    rt[off + 16..off + 24].copy_from_slice(&BIG_METADATA_OFFSET.to_le_bytes());
+    rt[off + 24..off + 28].copy_from_slice(&(METADATA_REGION_SIZE as u32).to_le_bytes());
+    rt[off + 28..off + 32].copy_from_slice(&1u32.to_le_bytes());
+    let crc = {
+        let mut tmp = rt.clone();
+        tmp[4..8].fill(0);
+        crc32c::crc32c(&tmp)
+    };
+    rt[4..8].copy_from_slice(&crc.to_le_bytes());
+    f.write_all_at(&rt, REGION_TABLE1_OFFSET).unwrap();
+
+    // 4. Metadata (same shape as the small fixture).
+    let mut meta = vec![0u8; METADATA_REGION_SIZE];
+    meta[0..8].copy_from_slice(b"metadata");
+    meta[10..12].copy_from_slice(&3u16.to_le_bytes());
+    let items_start = 32 + 3 * 32;
+    let file_params_off = items_start as u32;
+    let file_params_len = 8u32;
+    let virt_size_off = file_params_off + file_params_len;
+    let virt_size_len = 8u32;
+    let sector_size_off = virt_size_off + virt_size_len;
+    let sector_size_len = 4u32;
+    let off = 32;
+    meta[off..off + 16].copy_from_slice(&FILE_PARAMS_ID);
+    meta[off + 16..off + 20].copy_from_slice(&file_params_off.to_le_bytes());
+    meta[off + 20..off + 24].copy_from_slice(&file_params_len.to_le_bytes());
+    meta[off + 24..off + 28].copy_from_slice(&0x6u32.to_le_bytes());
+    let off = 32 + 32;
+    meta[off..off + 16].copy_from_slice(&VIRT_SIZE_ID);
+    meta[off + 16..off + 20].copy_from_slice(&virt_size_off.to_le_bytes());
+    meta[off + 20..off + 24].copy_from_slice(&virt_size_len.to_le_bytes());
+    meta[off + 24..off + 28].copy_from_slice(&0x6u32.to_le_bytes());
+    let off = 32 + 64;
+    meta[off..off + 16].copy_from_slice(&LOGICAL_SECTOR_ID);
+    meta[off + 16..off + 20].copy_from_slice(&sector_size_off.to_le_bytes());
+    meta[off + 20..off + 24].copy_from_slice(&sector_size_len.to_le_bytes());
+    meta[off + 24..off + 28].copy_from_slice(&0x6u32.to_le_bytes());
+    meta[file_params_off as usize..(file_params_off + 4) as usize]
+        .copy_from_slice(&BIG_BLOCK_SIZE.to_le_bytes());
+    meta[(file_params_off + 4) as usize..(file_params_off + 8) as usize]
+        .copy_from_slice(&0u32.to_le_bytes());
+    meta[virt_size_off as usize..(virt_size_off + 8) as usize]
+        .copy_from_slice(&BIG_VIRTUAL_DISK_SIZE.to_le_bytes());
+    meta[sector_size_off as usize..(sector_size_off + 4) as usize]
+        .copy_from_slice(&SECTOR_SIZE.to_le_bytes());
+    f.write_all_at(&meta, BIG_METADATA_OFFSET).unwrap();
+
+    // 5. BAT — 4 entries; only entry 0 is FullyPresent at 7 MiB.
+    let mut bat = vec![0u8; (BIG_BAT_ENTRIES * 8) as usize];
+    let entry0: u64 = ((BIG_DATA_BLOCK0_OFFSET >> 20) << 20) | 6;
+    bat[0..8].copy_from_slice(&entry0.to_le_bytes());
+    f.write_all_at(&bat, BIG_BAT_OFFSET).unwrap();
+
+    // 6. Block 0 contents.
+    f.write_all_at(block0, BIG_DATA_BLOCK0_OFFSET).unwrap();
+}
+
+fn pattern_block(seed: u8) -> Box<[u8; BIG_BLOCK_SIZE as usize]> {
+    let mut data = Box::new([0u8; BIG_BLOCK_SIZE as usize]);
+    for (i, b) in data.iter_mut().enumerate() {
+        *b = ((i as u32).wrapping_mul(seed as u32 + 1) & 0xFF) as u8;
+    }
+    data
+}
+
+#[test]
+fn rw_open_writes_into_allocated_block() {
+    let path = tmp_path("write_allocated");
+    let block0 = pattern_block(1);
+    build_big_vhdx(&path, &block0);
+
+    let r = VhdxReader::open_rw(&path).unwrap();
+    assert!(r.is_writable());
+
+    // Single-sector write into allocated block 0.
+    let payload = [0xC3u8; 512];
+    r.write_at(2048, &payload).unwrap();
+
+    // Read it back through the same handle.
+    let mut readback = [0u8; 512];
+    r.read_at(2048, &mut readback).unwrap();
+    assert_eq!(readback, payload);
+
+    // Untouched bytes inside block 0 still match the original pattern.
+    let mut around = [0u8; 32];
+    r.read_at(0, &mut around).unwrap();
+    for (i, b) in around.iter().enumerate() {
+        assert_eq!(*b, ((i as u32).wrapping_mul(2) & 0xFF) as u8);
+    }
+    drop(r);
+
+    // Reopen — change must be durable.
+    let r2 = VhdxReader::open(&path).unwrap();
+    let mut readback = [0u8; 512];
+    r2.read_at(2048, &mut readback).unwrap();
+    assert_eq!(readback, payload);
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn rw_open_writes_into_unallocated_block_allocates() {
+    let path = tmp_path("write_unalloc");
+    let block0 = pattern_block(2);
+    build_big_vhdx(&path, &block0);
+
+    let r = VhdxReader::open_rw(&path).unwrap();
+
+    // Block 1 (virtual offset 1 MiB) is unallocated. Writing into it
+    // should trigger allocation, BAT update, and the read-back should
+    // see the payload + zeros for the rest of the block.
+    let payload = [0x99u8; 4096];
+    let virt_off = BIG_BLOCK_SIZE as u64; // start of block 1
+    r.write_at(virt_off + 8192, &payload).unwrap();
+
+    // Bytes the caller wrote.
+    let mut got = [0u8; 4096];
+    r.read_at(virt_off + 8192, &mut got).unwrap();
+    assert_eq!(got, payload);
+
+    // Untouched bytes inside the freshly-allocated block read as zero.
+    let mut zero = [0u8; 4096];
+    r.read_at(virt_off, &mut zero).unwrap();
+    assert!(zero.iter().all(|b| *b == 0), "leading bytes not zero");
+
+    drop(r);
+
+    // Reopen and confirm allocation persisted.
+    let r2 = VhdxReader::open(&path).unwrap();
+    let mut got = [0u8; 4096];
+    r2.read_at(virt_off + 8192, &mut got).unwrap();
+    assert_eq!(got, payload);
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn rw_open_multi_block_write_spans_allocated_and_unallocated() {
+    let path = tmp_path("write_multiblock");
+    let block0 = pattern_block(3);
+    build_big_vhdx(&path, &block0);
+
+    let r = VhdxReader::open_rw(&path).unwrap();
+
+    // Write 1.5 MiB starting 256 KiB inside block 0 (allocated) so it
+    // straddles into block 1 (unallocated, must allocate).
+    let len: usize = (3 * BIG_BLOCK_SIZE as usize) / 2;
+    let mut payload = vec![0u8; len];
+    for (i, b) in payload.iter_mut().enumerate() {
+        *b = (i & 0xFF) as u8;
+    }
+    let start = 256 * 1024u64;
+    r.write_at(start, &payload).unwrap();
+
+    let mut readback = vec![0u8; len];
+    r.read_at(start, &mut readback).unwrap();
+    assert_eq!(readback, payload);
+
+    drop(r);
+    let r2 = VhdxReader::open(&path).unwrap();
+    let mut readback = vec![0u8; len];
+    r2.read_at(start, &mut readback).unwrap();
+    assert_eq!(readback, payload);
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn ro_open_against_writable_file_replays_dirty_log() {
+    // 1. Build a clean image.
+    let path = tmp_path("dirty_replay");
+    let block0 = pattern_block(4);
+    build_big_vhdx(&path, &block0);
+
+    // 2. Inject a dirty log: forge a single-entry log that overwrites
+    //    a 4 KiB sector inside block 0 with 0xEE, and bump the
+    //    header's log_guid so the reader thinks the log is active.
+    let log_guid = [0x77u8; 16];
+    // Sector with a recognisable post-replay byte pattern. Encoder
+    // saves the original first 8 + last 4 bytes as leading/trailing
+    // bytes inside the descriptor; after replay the reconstructed
+    // sector is byte-for-byte identical.
+    let sector = vec![0xEEu8; 4096];
+    let entry = vhdx::log::encode_entry(
+        2,
+        0,
+        &log_guid,
+        BIG_TOTAL_FILE_SIZE,
+        BIG_TOTAL_FILE_SIZE,
+        &[vhdx::log::PendingWrite {
+            file_offset: BIG_DATA_BLOCK0_OFFSET + 8192,
+            sector: sector.clone(),
+        }],
+    );
+
+    {
+        let mut f = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        // Splice the entry into the log region.
+        f.seek(SeekFrom::Start(BIG_LOG_OFFSET)).unwrap();
+        f.write_all(&entry).unwrap();
+
+        // Bump header.log_guid, sequence_number; rewrite header 2 (the
+        // currently-inactive slot) so it wins on next open.
+        let mut hdr = vec![0u8; HEADER_SIZE];
+        hdr[0..4].copy_from_slice(b"head");
+        hdr[8..16].copy_from_slice(&5u64.to_le_bytes());
+        hdr[48..64].copy_from_slice(&log_guid);
+        hdr[66..68].copy_from_slice(&1u16.to_le_bytes());
+        hdr[68..72].copy_from_slice(&BIG_LOG_LENGTH.to_le_bytes());
+        hdr[72..80].copy_from_slice(&BIG_LOG_OFFSET.to_le_bytes());
+        let crc = {
+            let mut tmp = hdr.clone();
+            tmp[4..8].fill(0);
+            crc32c::crc32c(&tmp)
+        };
+        hdr[4..8].copy_from_slice(&crc.to_le_bytes());
+        f.seek(SeekFrom::Start(128 * 1024)).unwrap();
+        f.write_all(&hdr).unwrap();
+        f.flush().unwrap();
+    }
+
+    // 3. Open RO. The file is RW on disk so replay can run in place.
+    let r = VhdxReader::open(&path).unwrap();
+
+    // 4. Block 0 sector at +8 KiB now reads as 0xEE — replay applied.
+    let mut got = [0u8; 4096];
+    r.read_at(8192, &mut got).unwrap();
+    assert!(got.iter().all(|b| *b == 0xEE), "first byte: {:#x}", got[0]);
+
+    // 5. Reopening must NOT replay again — log_guid was cleared.
+    drop(r);
+    let _ = VhdxReader::open(&path).unwrap();
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn open_on_device_round_trips_through_file_device() {
+    let path = tmp_path("on_device");
+    let block0 = pattern_block(5);
+    build_big_vhdx(&path, &block0);
+
+    let dev = std::sync::Arc::new(fs_core::FileDevice::open(&path).unwrap());
+    let r = VhdxReader::open_on_device(dev).unwrap();
+    assert_eq!(r.virtual_size(), BIG_VIRTUAL_DISK_SIZE);
+
+    let mut buf = [0u8; 4096];
+    r.read_at(0, &mut buf).unwrap();
+    for (i, b) in buf.iter().enumerate() {
+        let expected = ((i as u32).wrapping_mul(6) & 0xFF) as u8;
+        assert_eq!(*b, expected, "byte {i} mismatch");
+    }
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn open_rw_on_device_writes_persist() {
+    let path = tmp_path("rw_on_device");
+    let block0 = pattern_block(6);
+    build_big_vhdx(&path, &block0);
+
+    let dev = std::sync::Arc::new(fs_core::FileDevice::open_rw(&path).unwrap());
+    let r = VhdxReader::open_rw_on_device(dev).unwrap();
+    assert!(r.is_writable());
+
+    let payload = [0x55u8; 1024];
+    r.write_at(4096, &payload).unwrap();
+    r.flush().unwrap();
+
+    let mut readback = [0u8; 1024];
+    r.read_at(4096, &mut readback).unwrap();
+    assert_eq!(readback, payload);
+    drop(r);
+
+    let r2 = VhdxReader::open(&path).unwrap();
+    let mut readback = [0u8; 1024];
+    r2.read_at(4096, &mut readback).unwrap();
+    assert_eq!(readback, payload);
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn open_rw_on_device_rejects_readonly_inner() {
+    let path = tmp_path("rw_on_ro_inner");
+    let block0 = pattern_block(7);
+    build_big_vhdx(&path, &block0);
+
+    let dev = std::sync::Arc::new(fs_core::FileDevice::open(&path).unwrap());
+    match VhdxReader::open_rw_on_device(dev) {
+        Err(vhdx::Error::ReadOnly) => {}
+        Err(e) => panic!("expected ReadOnly, got: {e}"),
+        Ok(_) => panic!("expected ReadOnly, got Ok"),
+    }
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn ro_open_rejects_write() {
+    let path = tmp_path("ro_rejects_write");
+    let block0 = pattern_block(8);
+    build_big_vhdx(&path, &block0);
+
+    let r = VhdxReader::open(&path).unwrap();
+    let err = r.write_at(0, b"x").unwrap_err();
+    assert!(matches!(err, vhdx::Error::ReadOnly));
+    let _ = std::fs::remove_file(&path);
+}
