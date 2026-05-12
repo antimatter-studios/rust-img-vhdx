@@ -11,7 +11,7 @@ name = "vhdx"
 crate-type = ["staticlib", "rlib"]
 
 [dependencies]
-am-fs-core = { path = "../rust-fs-core", version = "0.1" }
+am-fs-core = { path = "../rust-fs-core", version = "0.2" }
 # CRC-32C (Castagnoli) for VHDX header / region-table / metadata checksums.
 crc32c = "0.6"
 
