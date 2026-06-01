@@ -56,22 +56,42 @@ fn assert_qemu(args: &[&str]) {
     );
 }
 
-fn tmp_path(name: &str) -> PathBuf {
+fn tmp_path(name: &str) -> TempPath {
     use std::sync::atomic::{AtomicU32, Ordering};
     static N: AtomicU32 = AtomicU32::new(0);
     let n = N.fetch_add(1, Ordering::Relaxed);
     let mut p = std::env::temp_dir();
     p.push(format!("vhdx_qemu_{}_{n}_{name}.vhdx", std::process::id()));
-    p
+    TempPath(p)
 }
 
-fn raw_path(name: &str) -> PathBuf {
+/// RAII temp-file path: removes the backing file on drop so a panicking
+/// assertion can't leak fixtures into the temp dir across CI runs.
+struct TempPath(PathBuf);
+impl std::ops::Deref for TempPath {
+    type Target = Path;
+    fn deref(&self) -> &Path {
+        &self.0
+    }
+}
+impl AsRef<Path> for TempPath {
+    fn as_ref(&self) -> &Path {
+        &self.0
+    }
+}
+impl Drop for TempPath {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+fn raw_path(name: &str) -> TempPath {
     use std::sync::atomic::{AtomicU32, Ordering};
     static N: AtomicU32 = AtomicU32::new(0);
     let n = N.fetch_add(1, Ordering::Relaxed);
     let mut p = std::env::temp_dir();
     p.push(format!("vhdx_qemu_{}_{n}_{name}.raw", std::process::id()));
-    p
+    TempPath(p)
 }
 
 fn qemu_create(path: &Path, size: &str) {
@@ -79,7 +99,7 @@ fn qemu_create(path: &Path, size: &str) {
 }
 
 fn qemu_check(path: &Path) {
-    assert_qemu(&["check", path.to_str().unwrap()]);
+    assert_qemu(&["check", "-f", "vhdx", path.to_str().unwrap()]);
 }
 
 /// Replay any pending log and repair, then assert the image is clean.
@@ -90,7 +110,7 @@ fn qemu_replay_then_check_clean(path: &Path) {
     // First pass: allow replay/repair. This may report "N corruptions
     // ... repaired" purely from replaying our log — that is expected
     // and not a failure.
-    let repair = run_qemu(&["check", "-r", "all", path.to_str().unwrap()]);
+    let repair = run_qemu(&["check", "-f", "vhdx", "-r", "all", path.to_str().unwrap()]);
     assert!(
         repair.status.success(),
         "`qemu-img check -r all` failed:\n{}",

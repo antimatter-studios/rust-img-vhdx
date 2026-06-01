@@ -100,12 +100,17 @@ fn falls_back_to_header2_when_header1_crc_is_invalid() {
 }
 
 #[test]
-fn higher_sequence_header_is_selected() {
-    let path = tmp_path("higher_seq");
+fn opens_with_two_valid_header_slots() {
+    let path = tmp_path("two_headers");
     build_vhdx(&path, &ramp_block());
-    // Header 1 has sequence 1 (from build_vhdx). Add a valid header 2
-    // with a much higher sequence. The image must still open and read
-    // correctly — exercising the sequence-number comparison branch.
+    // Header 1 has sequence 1 (from build_vhdx). Add a second valid header
+    // with a much higher sequence so both slots parse. The image must
+    // still open and read correctly. (Both slots carry identical
+    // log-less content, so this asserts robustness to two valid headers,
+    // not which one wins — the higher-sequence *selection* is proven
+    // end-to-end by `ro_open_against_writable_file_replays_dirty_log` in
+    // tests/synthetic.rs, whose replay only fires when the higher-sequence
+    // slot-2 header is chosen.)
     patch(&path, HEADER2_OFFSET, &encode_header(999, [0u8; 16], 0, 0));
     let r = VhdxReader::open(&path).unwrap();
     let mut buf = [0u8; 8];
