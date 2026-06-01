@@ -163,3 +163,120 @@ pub fn read_sector_size(bytes: &[u8]) -> Result<u32> {
     }
     Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a metadata region with `entry_count` declared in the header
+    /// and one File Parameters entry whose item data sits right after the
+    /// entry table.
+    fn region_with_one_file_params(entry_count: u16, block_size: u32, flags: u32) -> Vec<u8> {
+        let mut m = vec![0u8; 64 * 1024];
+        m[0..8].copy_from_slice(METADATA_SIGNATURE);
+        m[10..12].copy_from_slice(&entry_count.to_le_bytes());
+
+        let item_off = (METADATA_HEADER_SIZE + METADATA_ENTRY_SIZE) as u32;
+        let entry = METADATA_HEADER_SIZE;
+        m[entry..entry + 16].copy_from_slice(&item_ids::FILE_PARAMETERS);
+        m[entry + 16..entry + 20].copy_from_slice(&item_off.to_le_bytes());
+        m[entry + 20..entry + 24].copy_from_slice(&8u32.to_le_bytes());
+        m[entry + 24..entry + 28].copy_from_slice(&0x6u32.to_le_bytes());
+
+        let i = item_off as usize;
+        m[i..i + 4].copy_from_slice(&block_size.to_le_bytes());
+        m[i + 4..i + 8].copy_from_slice(&flags.to_le_bytes());
+        m
+    }
+
+    #[test]
+    fn parses_entries_and_reads_item_data() {
+        let m = region_with_one_file_params(1, 1 << 20, 0);
+        let table = MetadataTable::parse(m).unwrap();
+        assert_eq!(table.entries.len(), 1);
+        let data = table
+            .item_data(&item_ids::FILE_PARAMETERS)
+            .expect("file params item present");
+        let fp = FileParameters::parse(data).unwrap();
+        assert_eq!(fp.block_size, 1 << 20);
+        assert!(!fp.has_parent());
+    }
+
+    #[test]
+    fn item_data_returns_none_for_absent_item() {
+        let m = region_with_one_file_params(1, 1 << 20, 0);
+        let table = MetadataTable::parse(m).unwrap();
+        assert!(table.item_data(&item_ids::VIRTUAL_DISK_SIZE).is_none());
+    }
+
+    #[test]
+    fn item_data_returns_none_when_entry_points_out_of_bounds() {
+        let mut m = region_with_one_file_params(1, 1 << 20, 0);
+        // Make the entry's length run past the end of the region.
+        let entry = METADATA_HEADER_SIZE;
+        m[entry + 20..entry + 24].copy_from_slice(&u32::MAX.to_le_bytes());
+        let table = MetadataTable::parse(m).unwrap();
+        assert!(table.item_data(&item_ids::FILE_PARAMETERS).is_none());
+    }
+
+    #[test]
+    fn rejects_region_shorter_than_header() {
+        let err = MetadataTable::parse(vec![0u8; 8]).unwrap_err();
+        assert!(matches!(err, Error::BadMetadata(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn rejects_bad_signature() {
+        let mut m = region_with_one_file_params(1, 1 << 20, 0);
+        m[0..8].copy_from_slice(b"NOTmeta!");
+        let err = MetadataTable::parse(m).unwrap_err();
+        assert!(matches!(err, Error::BadMetadata(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn rejects_entry_count_above_max() {
+        let mut m = region_with_one_file_params(1, 1 << 20, 0);
+        m[10..12].copy_from_slice(&2048u16.to_le_bytes());
+        let err = MetadataTable::parse(m).unwrap_err();
+        assert!(matches!(err, Error::BadMetadata(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn rejects_region_truncated_mid_entry() {
+        // Declare 3 entries but provide a buffer that only spans the
+        // header + first entry.
+        let mut m = vec![0u8; METADATA_HEADER_SIZE + METADATA_ENTRY_SIZE];
+        m[0..8].copy_from_slice(METADATA_SIGNATURE);
+        m[10..12].copy_from_slice(&3u16.to_le_bytes());
+        let err = MetadataTable::parse(m).unwrap_err();
+        assert!(matches!(err, Error::BadMetadata(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn file_parameters_has_parent_reads_flag_bit_1() {
+        let with_parent = FileParameters::parse(&[0, 0, 16, 0, 0x02, 0, 0, 0]).unwrap();
+        assert!(with_parent.has_parent());
+        let leave_allocated = FileParameters::parse(&[0, 0, 16, 0, 0x01, 0, 0, 0]).unwrap();
+        assert!(!leave_allocated.has_parent());
+    }
+
+    #[test]
+    fn file_parameters_rejects_short_buffer() {
+        let err = FileParameters::parse(&[0u8; 4]).unwrap_err();
+        assert!(matches!(err, Error::BadMetadata(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn reads_virtual_disk_size_little_endian() {
+        let v = read_virtual_disk_size(&(0x1234_5678_9ABCu64).to_le_bytes()).unwrap();
+        assert_eq!(v, 0x1234_5678_9ABC);
+        assert!(read_virtual_disk_size(&[0u8; 4]).is_err());
+    }
+
+    #[test]
+    fn reads_sector_size_little_endian() {
+        let s = read_sector_size(&512u32.to_le_bytes()).unwrap();
+        assert_eq!(s, 512);
+        assert!(read_sector_size(&[0u8; 2]).is_err());
+    }
+}

@@ -128,3 +128,109 @@ pub fn data_bat_index(virt_block_idx: u64, chunk_ratio: u64) -> u64 {
     let block_in_chunk = virt_block_idx % chunk_ratio;
     chunk_idx * (chunk_ratio + 1) + block_in_chunk
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn payload_state_decodes_every_documented_value() {
+        assert_eq!(PayloadState::from_u8(0), PayloadState::NotPresent);
+        assert_eq!(PayloadState::from_u8(1), PayloadState::Undefined);
+        assert_eq!(PayloadState::from_u8(2), PayloadState::Zero);
+        assert_eq!(PayloadState::from_u8(3), PayloadState::Unmapped);
+        assert_eq!(PayloadState::from_u8(6), PayloadState::FullyPresent);
+        assert_eq!(PayloadState::from_u8(7), PayloadState::PartiallyPresent);
+    }
+
+    #[test]
+    fn payload_state_maps_unknown_values_to_reserved() {
+        // 4, 5, and anything >7 are not assigned by the spec; the reader
+        // must funnel them to Reserved (treated as NotPresent for safety)
+        // rather than silently aliasing a real state.
+        assert_eq!(PayloadState::from_u8(4), PayloadState::Reserved(4));
+        assert_eq!(PayloadState::from_u8(5), PayloadState::Reserved(5));
+        assert_eq!(PayloadState::from_u8(255), PayloadState::Reserved(255));
+    }
+
+    #[test]
+    fn block_on_disk_only_for_present_states() {
+        assert!(PayloadState::FullyPresent.block_on_disk());
+        assert!(PayloadState::PartiallyPresent.block_on_disk());
+        for s in [
+            PayloadState::NotPresent,
+            PayloadState::Undefined,
+            PayloadState::Zero,
+            PayloadState::Unmapped,
+            PayloadState::Reserved(4),
+        ] {
+            assert!(!s.block_on_disk(), "{s:?} must not claim a disk block");
+        }
+    }
+
+    #[test]
+    fn zero_fill_for_the_four_absent_states_only() {
+        for s in [
+            PayloadState::NotPresent,
+            PayloadState::Undefined,
+            PayloadState::Zero,
+            PayloadState::Unmapped,
+        ] {
+            assert!(s.zero_fill(), "{s:?} should zero-fill");
+        }
+        assert!(!PayloadState::FullyPresent.zero_fill());
+        assert!(!PayloadState::PartiallyPresent.zero_fill());
+        // Reserved is handled conservatively by the reader elsewhere; it
+        // is not itself a zero_fill state. Pin the current contract.
+        assert!(!PayloadState::Reserved(4).zero_fill());
+    }
+
+    #[test]
+    fn bat_entry_splits_state_and_megabyte_offset() {
+        // file_offset_mb = 3, state = 6 (FullyPresent).
+        let e = BatEntry::from_u64((3u64 << 20) | 6);
+        assert_eq!(e.state, PayloadState::FullyPresent);
+        assert_eq!(e.file_offset, 3 << 20);
+    }
+
+    #[test]
+    fn bat_entry_ignores_reserved_bits_between_state_and_offset() {
+        // Set every reserved bit (3..20) plus state=2 and offset_mb=10.
+        let reserved = 0xF_FFF8u64; // bits 3..20 all set
+        let raw = (10u64 << 20) | reserved | 2;
+        let e = BatEntry::from_u64(raw);
+        assert_eq!(e.state, PayloadState::Zero);
+        assert_eq!(e.file_offset, 10 << 20);
+    }
+
+    #[test]
+    fn bat_entry_unallocated_is_zero_raw() {
+        let e = BatEntry::from_u64(0);
+        assert_eq!(e.state, PayloadState::NotPresent);
+        assert_eq!(e.file_offset, 0);
+    }
+
+    #[test]
+    fn chunk_ratio_matches_spec_formula() {
+        // (2^23 * sector_size) / block_size.
+        // 1 MiB block, 512 sector -> 2^32 / 2^20 = 4096.
+        assert_eq!(chunk_ratio(1 << 20, 512), 4096);
+        // 2 MiB block, 512 sector -> 2^32 / 2^21 = 2048.
+        assert_eq!(chunk_ratio(2 << 20, 512), 2048);
+        // 1 MiB block, 4096 sector -> 2^23 * 2^12 / 2^20 = 2^15 = 32768.
+        assert_eq!(chunk_ratio(1 << 20, 4096), 32768);
+    }
+
+    #[test]
+    fn data_bat_index_accounts_for_interleaved_sector_bitmap_entries() {
+        let cr = 4096;
+        // First chunk maps 1:1.
+        assert_eq!(data_bat_index(0, cr), 0);
+        assert_eq!(data_bat_index(cr - 1, cr), cr - 1);
+        // Crossing into chunk 1 skips the chunk-0 sector-bitmap entry.
+        assert_eq!(data_bat_index(cr, cr), cr + 1);
+        assert_eq!(data_bat_index(cr + 1, cr), cr + 2);
+        // Chunk 2 skips two sector-bitmap entries.
+        assert_eq!(data_bat_index(2 * cr, cr), 2 * cr + 2);
+    }
+}

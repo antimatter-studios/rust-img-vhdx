@@ -126,3 +126,90 @@ fn read_u64_le(b: &[u8], off: usize) -> u64 {
         b[off + 7],
     ])
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a valid region table with a BAT entry (offset 2 MiB) and a
+    /// metadata entry (offset 1 MiB) and a correct CRC-32C.
+    fn valid_region_table() -> Vec<u8> {
+        let mut rt = vec![0u8; REGION_TABLE_SIZE];
+        rt[0..4].copy_from_slice(REGION_TABLE_SIGNATURE);
+        rt[8..12].copy_from_slice(&2u32.to_le_bytes()); // entry_count = 2
+
+        let off = 16;
+        rt[off..off + 16].copy_from_slice(&guids::BAT);
+        rt[off + 16..off + 24].copy_from_slice(&(2u64 << 20).to_le_bytes());
+        rt[off + 24..off + 28].copy_from_slice(&8u32.to_le_bytes());
+        rt[off + 28..off + 32].copy_from_slice(&1u32.to_le_bytes()); // required
+
+        let off = 48;
+        rt[off..off + 16].copy_from_slice(&guids::METADATA);
+        rt[off + 16..off + 24].copy_from_slice(&(1u64 << 20).to_le_bytes());
+        rt[off + 24..off + 28].copy_from_slice(&(64u32 * 1024).to_le_bytes());
+        rt[off + 28..off + 32].copy_from_slice(&0u32.to_le_bytes()); // not required
+
+        let crc = compute_crc(&rt);
+        rt[4..8].copy_from_slice(&crc.to_le_bytes());
+        rt
+    }
+
+    #[test]
+    fn parses_entries_and_finds_known_guids() {
+        let rt = RegionTable::parse(&valid_region_table()).unwrap();
+        assert_eq!(rt.entries.len(), 2);
+
+        let bat = rt.find(&guids::BAT).expect("BAT entry present");
+        assert_eq!(bat.file_offset, 2 << 20);
+        assert_eq!(bat.length, 8);
+        assert!(bat.required);
+
+        let meta = rt.find(&guids::METADATA).expect("metadata entry present");
+        assert_eq!(meta.file_offset, 1 << 20);
+        assert!(!meta.required);
+    }
+
+    #[test]
+    fn find_returns_none_for_unknown_guid() {
+        let rt = RegionTable::parse(&valid_region_table()).unwrap();
+        assert!(rt.find(&[0xFF; 16]).is_none());
+    }
+
+    #[test]
+    fn rejects_buffer_shorter_than_64_kib() {
+        let err = RegionTable::parse(&[0u8; 1000]).unwrap_err();
+        assert!(matches!(err, Error::Corrupt(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn rejects_bad_signature() {
+        let mut rt = valid_region_table();
+        rt[0..4].copy_from_slice(b"junk");
+        let crc = compute_crc(&rt);
+        rt[4..8].copy_from_slice(&crc.to_le_bytes());
+        let err = RegionTable::parse(&rt).unwrap_err();
+        assert!(matches!(err, Error::Corrupt(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn rejects_crc_mismatch() {
+        let mut rt = valid_region_table();
+        rt[16] ^= 0xFF; // perturb the first entry's GUID
+        let err = RegionTable::parse(&rt).unwrap_err();
+        match err {
+            Error::BadChecksum { what, .. } => assert_eq!(what, "region-table"),
+            other => panic!("expected BadChecksum, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_entry_count_above_max() {
+        let mut rt = valid_region_table();
+        rt[8..12].copy_from_slice(&2048u32.to_le_bytes());
+        let crc = compute_crc(&rt);
+        rt[4..8].copy_from_slice(&crc.to_le_bytes());
+        let err = RegionTable::parse(&rt).unwrap_err();
+        assert!(matches!(err, Error::Corrupt(_)), "got {err:?}");
+    }
+}
