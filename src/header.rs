@@ -105,3 +105,80 @@ fn read_u64_le(b: &[u8], off: usize) -> u64 {
         b[off + 7],
     ])
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a structurally valid 4 KiB header with the given sequence
+    /// number and a correct CRC-32C. Optional knobs let callers corrupt
+    /// individual fields after the fact.
+    fn valid_header(seq: u64) -> Vec<u8> {
+        let mut h = vec![0u8; HEADER_SIZE];
+        h[0..4].copy_from_slice(HEADER_SIGNATURE);
+        h[8..16].copy_from_slice(&seq.to_le_bytes());
+        h[16..32].copy_from_slice(&[0xAA; 16]); // file_write_guid
+        h[32..48].copy_from_slice(&[0xBB; 16]); // data_write_guid
+        h[48..64].copy_from_slice(&[0xCC; 16]); // log_guid
+        h[66..68].copy_from_slice(&1u16.to_le_bytes()); // version = 1
+        h[68..72].copy_from_slice(&(1u32 << 20).to_le_bytes()); // log_length = 1 MiB
+        h[72..80].copy_from_slice(&(4u64 << 20).to_le_bytes()); // log_offset = 4 MiB
+        let crc = compute_crc(&h);
+        h[4..8].copy_from_slice(&crc.to_le_bytes());
+        h
+    }
+
+    #[test]
+    fn parses_a_valid_header_and_exposes_fields() {
+        let h = valid_header(42);
+        let parsed = Header::parse(&h).unwrap();
+        assert_eq!(parsed.sequence_number, 42);
+        assert_eq!(parsed.version, 1);
+        assert_eq!(parsed.log_length, 1 << 20);
+        assert_eq!(parsed.log_offset, 4 << 20);
+        assert_eq!(parsed.file_write_guid, [0xAA; 16]);
+        assert_eq!(parsed.data_write_guid, [0xBB; 16]);
+        assert_eq!(parsed.log_guid, [0xCC; 16]);
+    }
+
+    #[test]
+    fn rejects_buffer_shorter_than_4_kib() {
+        let err = Header::parse(&[0u8; 100]).unwrap_err();
+        assert!(matches!(err, Error::Corrupt(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn rejects_bad_signature() {
+        let mut h = valid_header(1);
+        h[0..4].copy_from_slice(b"xxxx");
+        // Recompute CRC so the failure is attributable to the signature,
+        // not a checksum mismatch.
+        let crc = compute_crc(&h);
+        h[4..8].copy_from_slice(&crc.to_le_bytes());
+        let err = Header::parse(&h).unwrap_err();
+        assert!(matches!(err, Error::Corrupt(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn rejects_crc_mismatch() {
+        let mut h = valid_header(1);
+        // Flip a payload byte without recomputing the stored CRC.
+        h[8] ^= 0xFF;
+        let err = Header::parse(&h).unwrap_err();
+        match err {
+            Error::BadChecksum { what, .. } => assert_eq!(what, "header"),
+            other => panic!("expected BadChecksum, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compute_crc_is_independent_of_stored_checksum_field() {
+        let mut h = valid_header(7);
+        let a = compute_crc(&h);
+        // Scribble over the stored checksum field; compute_crc zeroes it
+        // internally, so the result must not change.
+        h[4..8].copy_from_slice(&0xDEAD_BEEFu32.to_le_bytes());
+        let b = compute_crc(&h);
+        assert_eq!(a, b);
+    }
+}
