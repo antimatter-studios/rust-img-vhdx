@@ -544,11 +544,16 @@ impl VhdxReader {
             // Entry doesn't fit — skip journaling.
             return Ok(());
         }
-        // Always splice at the start of the log region — replay walks
-        // every sector slot anyway, so position only matters for write
-        // amplification, not correctness.
-        // First clear the entire log region so we don't merge old
-        // entries with the new one.
+        // Clear the whole log region first, then splice at its start.
+        //
+        // The clear is what makes this correct: it guarantees the entry
+        // written below is the only one in the region, so it is the
+        // first entry of its own chain — which is exactly what the
+        // `tail: 0` passed to `encode_entry` above claims, and what
+        // `collect_replay_chain` anchors its walk on. Position itself
+        // is a write-amplification question; the invariant replay
+        // depends on is that a chain's first entry really is where its
+        // `tail` says it is.
         zero_log_region(&self.dev, header.log_offset, header.log_length)?;
         self.dev_write(header.log_offset, &entry)?;
         self.dev_flush()?;
