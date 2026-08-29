@@ -63,9 +63,8 @@
 //! exactly as it stood when the last surviving entry committed, which
 //! is a state that did exist.
 //!
-//! A chain that wraps past the end of the region is followed only as
-//! far as the wrap. That prefix is still a committed state, so stopping
-//! there is conservative rather than wrong.
+//! The region is circular, so a chain whose entries run off the end of
+//! it is followed round to offset 0 rather than cut short there.
 
 use crate::error::{Error, Result};
 use fs_core::BlockDevice;
@@ -326,8 +325,9 @@ fn entry_starting_at(found: &[LogEntry], offset: usize) -> Option<&LogEntry> {
 /// from either side of a break.
 ///
 /// Returns an empty vec when `expected_log_guid` is all-zero (the spec
-/// sentinel for "log is empty"), when the log region is missing, or
-/// when the region holds no entry of this chain.
+/// sentinel for "log is empty"), when the log region is missing, when
+/// the region holds no entry of this chain, or when the chain's own
+/// start cannot be located.
 pub fn collect_replay_chain(log_bytes: &[u8], expected_log_guid: &[u8; 16]) -> Vec<LogEntry> {
     if expected_log_guid.iter().all(|b| *b == 0) {
         return Vec::new();
@@ -374,19 +374,24 @@ pub fn collect_replay_chain(log_bytes: &[u8], expected_log_guid: &[u8; 16]) -> V
     // format provides so that a replayer does not have to guess. Using
     // it is what keeps an older chain still lying in the region, or a
     // chain that does not begin at offset 0, from being mistaken for
-    // part of this one. If it points at nothing we recognise, fall back
-    // to the first entry found.
-    let tail = head.header.tail as usize;
-    let start = match entry_starting_at(&found, tail) {
-        Some(entry) => entry.log_offset_in_region as usize,
-        None => found[0].log_offset_in_region as usize,
+    // part of this one.
+    //
+    // If it resolves to nothing we found, we do not guess. The caller
+    // erases the log region and marks the image clean the moment a
+    // chain comes back, so falling back to whatever entry sits lowest
+    // in the region would let a stale chain be applied and destroy the
+    // live one on its way out. Replaying nothing leaves the log intact
+    // for a reader that can make sense of it.
+    let Some(first) = entry_starting_at(&found, head.header.tail as usize) else {
+        return Vec::new();
     };
+    let start = first.log_offset_in_region as usize;
 
     // Pass 4 — the walk, and the stop. Each entry must sit immediately
     // after its predecessor and carry exactly the next sequence number.
     // The first slot that fails either test ends the chain, whatever
-    // the reason: a torn entry, a foreign one, a gap, a wrap past the
-    // end of the region, or simply the end of what was written.
+    // the reason: a torn entry, a foreign one, a gap in the sequence,
+    // or simply the end of what was written.
     let mut chain: Vec<LogEntry> = Vec::new();
     let mut pos = start;
     let mut expected_sequence: Option<u64> = None;
@@ -397,6 +402,13 @@ pub fn collect_replay_chain(log_bytes: &[u8], expected_log_guid: &[u8; 16]) -> V
             }
         }
         pos += entry.header.entry_length as usize;
+        // The region is circular: an entry ending exactly at its end is
+        // followed by one at offset 0. Sequence numbers rise by one at
+        // every step, so no entry can be reached twice and the walk
+        // terminates whether or not it goes round.
+        if pos >= log_bytes.len() {
+            pos -= log_bytes.len();
+        }
         let next = entry.header.sequence_number.checked_add(1);
         chain.push(entry.clone());
         match next {
@@ -833,6 +845,52 @@ mod tests {
         let chain = collect_replay_chain(&region, &LIVE_GUID);
         assert_eq!(sequences(&chain), vec![1, 2]);
         assert_eq!(chain[0].log_offset_in_region, start as u64);
+    }
+
+    #[test]
+    fn a_chain_that_wraps_the_end_of_the_region_is_followed_round() {
+        // Sequences 1 and 2 fill the last two entry slots and 3 lands
+        // back at offset 0. Cutting the chain at the wrap would apply
+        // 1 and 2, then erase the region holding 3 — losing a committed
+        // entry rather than declining to replay a doubtful one.
+        let start = TEST_REGION_LEN - 2 * ONE_WRITE_ENTRY_LEN;
+        let mut region = vec![0u8; TEST_REGION_LEN];
+        splice(
+            &mut region,
+            start,
+            &one_write_entry(1, start as u32, &LIVE_GUID),
+        );
+        splice(
+            &mut region,
+            TEST_REGION_LEN - ONE_WRITE_ENTRY_LEN,
+            &one_write_entry(2, start as u32, &LIVE_GUID),
+        );
+        splice(
+            &mut region,
+            0,
+            &one_write_entry(3, start as u32, &LIVE_GUID),
+        );
+
+        let chain = collect_replay_chain(&region, &LIVE_GUID);
+        assert_eq!(sequences(&chain), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn an_unlocatable_chain_start_replays_nothing() {
+        // The head says its sequence began at the second slot, and that
+        // slot is torn. Where this chain starts is now unknowable, and
+        // the entry still sitting at offset 0 belongs to a run the head
+        // has disowned. Replaying it would apply a stale write and then
+        // let the caller erase the log that still holds the real chain.
+        let mut region = contiguous_chain(4);
+        splice(
+            &mut region,
+            3 * ONE_WRITE_ENTRY_LEN,
+            &one_write_entry(4, ONE_WRITE_ENTRY_LEN as u32, &LIVE_GUID),
+        );
+        region[ONE_WRITE_ENTRY_LEN + LOG_SECTOR_SIZE + 7] ^= 0xFF;
+
+        assert!(collect_replay_chain(&region, &LIVE_GUID).is_empty());
     }
 
     /// Hand-built entry carrying a single "zero" descriptor. The
