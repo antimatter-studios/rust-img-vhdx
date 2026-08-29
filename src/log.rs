@@ -48,10 +48,23 @@
 //! data_signature + sequence_high) and `trailing_bytes` (last 4 bytes
 //! overwritten by sequence_low).
 //!
-//! Replay walks entries in increasing-sequence order starting from
-//! `header.log_guid`'s active chain. We keep it conservative: we accept
-//! a chain of contiguous entries with valid CRCs, matching log_guid,
-//! and strictly increasing sequence numbers. Any break ends the chain.
+//! Replay walks the active chain forward from its start and stops at
+//! the first break. A slot joins the chain only if it holds a CRC-valid
+//! entry stamped with `header.log_guid`, sitting immediately after its
+//! predecessor, and carrying exactly the next sequence number. The
+//! chain starts where the highest-sequence entry's `tail` says its
+//! sequence began.
+//!
+//! Everything after a break — a torn entry, a gap in the sequence, an
+//! entry belonging to another chain — is left unapplied. A journal's
+//! whole promise is that a batch lands whole or not at all, so applying
+//! the successors of an entry that did not survive would produce an
+//! image no writer ever committed. Stopping instead leaves the image
+//! exactly as it stood when the last surviving entry committed, which
+//! is a state that did exist.
+//!
+//! The region is circular, so a chain whose entries run off the end of
+//! it is followed round to offset 0 rather than cut short there.
 
 use crate::error::{Error, Result};
 use fs_core::BlockDevice;
@@ -64,6 +77,36 @@ pub const LOG_ENTRY_SIGNATURE: &[u8; 4] = b"loge";
 pub const ZERO_DESC_SIGNATURE: &[u8; 4] = b"zero";
 pub const DATA_DESC_SIGNATURE: &[u8; 4] = b"desc";
 pub const DATA_SECTOR_SIGNATURE: &[u8; 4] = b"data";
+
+/// Why a 4 KiB slot did not yield a log entry belonging to the chain
+/// being replayed.
+///
+/// The variants are not interchangeable, which is the reason they are
+/// named at all: `Empty` says nothing was ever written here, and the
+/// other three say something was written here and cannot be used. A
+/// replayer that cannot tell those apart cannot tell "the log ends
+/// here" from "the log is damaged here", and will happily step over the
+/// damage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntryReject {
+    /// No entry signature. An unused slot, or the interior of an entry
+    /// whose header sits earlier in the region. Nothing was lost.
+    Empty,
+    /// An entry header is present but the bytes under it do not check
+    /// out — a failed CRC, or a length the header contradicts. This is
+    /// what a crash partway through writing an entry leaves behind.
+    Corrupt,
+    /// A structurally sound entry stamped with a different `log_guid`.
+    /// It belongs to another chain and is not ours to replay.
+    ForeignChain,
+    /// CRC-clean but internally inconsistent: a descriptor table that
+    /// overruns the entry, an unrecognised descriptor signature, or a
+    /// data sector that is missing or stamped with the wrong sequence.
+    Malformed,
+}
+
+/// Either an entry or the reason there isn't one.
+type ParseOutcome = std::result::Result<LogEntry, EntryReject>;
 
 #[derive(Debug, Clone)]
 pub struct LogEntryHeader {
@@ -127,27 +170,29 @@ fn read_u64_le(b: &[u8], off: usize) -> u64 {
 }
 
 /// Try to parse one log entry starting at `pos` inside `log_bytes`.
-/// Returns None when the slot does not contain a valid entry — caller
-/// uses that to stop scanning the chain.
-fn parse_log_entry(log_bytes: &[u8], pos: usize, expected_log_guid: &[u8; 16]) -> Option<LogEntry> {
+///
+/// The error says *why* the slot was refused. `Empty` means keep
+/// looking; the other three mean something was written here that cannot
+/// be replayed, which the caller must not treat as an empty slot.
+fn parse_log_entry(log_bytes: &[u8], pos: usize, expected_log_guid: &[u8; 16]) -> ParseOutcome {
     if pos + LOG_SECTOR_SIZE > log_bytes.len() {
-        return None;
+        return Err(EntryReject::Empty);
     }
     let head = &log_bytes[pos..pos + LOG_SECTOR_SIZE];
     if &head[0..4] != LOG_ENTRY_SIGNATURE {
-        return None;
+        return Err(EntryReject::Empty);
     }
     let entry_length = read_u32_le(head, 8) as usize;
     if entry_length < LOG_SECTOR_SIZE
         || !entry_length.is_multiple_of(LOG_SECTOR_SIZE)
         || pos + entry_length > log_bytes.len()
     {
-        return None;
+        return Err(EntryReject::Corrupt);
     }
     let entry_bytes = &log_bytes[pos..pos + entry_length];
     let stored_crc = read_u32_le(entry_bytes, 4);
     if stored_crc != entry_crc(entry_bytes) {
-        return None;
+        return Err(EntryReject::Corrupt);
     }
 
     let tail = read_u32_le(entry_bytes, 12);
@@ -159,13 +204,16 @@ fn parse_log_entry(log_bytes: &[u8], pos: usize, expected_log_guid: &[u8; 16]) -
     let last_file_offset = read_u64_le(entry_bytes, 56);
 
     if &log_guid != expected_log_guid {
-        return None;
+        return Err(EntryReject::ForeignChain);
     }
 
     // Descriptors live immediately after the 64-byte header.
-    let descriptors_size = (descriptor_count as usize).checked_mul(LOG_DESCRIPTOR_SIZE)?;
+    let Some(descriptors_size) = (descriptor_count as usize).checked_mul(LOG_DESCRIPTOR_SIZE)
+    else {
+        return Err(EntryReject::Malformed);
+    };
     if LOG_ENTRY_HEADER_SIZE + descriptors_size > entry_length {
-        return None;
+        return Err(EntryReject::Malformed);
     }
 
     // Count "desc" entries up front so we know how many data sectors to
@@ -187,7 +235,7 @@ fn parse_log_entry(log_bytes: &[u8], pos: usize, expected_log_guid: &[u8; 16]) -
         let sig = &entry_bytes[off..off + 4];
         let desc_seq = read_u64_le(entry_bytes, off + 24);
         if desc_seq != sequence_number {
-            return None;
+            return Err(EntryReject::Malformed);
         }
         if sig == ZERO_DESC_SIGNATURE {
             let zero_length = read_u64_le(entry_bytes, off + 8);
@@ -203,18 +251,18 @@ fn parse_log_entry(log_bytes: &[u8], pos: usize, expected_log_guid: &[u8; 16]) -
             let file_offset = read_u64_le(entry_bytes, off + 16);
 
             if data_sector_base + LOG_SECTOR_SIZE > entry_length {
-                return None;
+                return Err(EntryReject::Malformed);
             }
             let sector = &entry_bytes[data_sector_base..data_sector_base + LOG_SECTOR_SIZE];
             // Validate data-sector signature + sequence halves.
             if &sector[0..4] != DATA_SECTOR_SIGNATURE {
-                return None;
+                return Err(EntryReject::Malformed);
             }
             let seq_hi = read_u32_le(sector, 4);
             let seq_lo = read_u32_le(sector, LOG_SECTOR_SIZE - 4);
             let assembled = ((seq_hi as u64) << 32) | (seq_lo as u64);
             if assembled != sequence_number {
-                return None;
+                return Err(EntryReject::Malformed);
             }
 
             // Reconstruct the original 4 KiB sector that was meant for
@@ -237,12 +285,12 @@ fn parse_log_entry(log_bytes: &[u8], pos: usize, expected_log_guid: &[u8; 16]) -
             data_sector_base += LOG_SECTOR_SIZE;
             data_sector_idx += 1;
         } else {
-            return None;
+            return Err(EntryReject::Malformed);
         }
     }
     let _ = data_sector_idx;
 
-    Some(LogEntry {
+    Ok(LogEntry {
         header: LogEntryHeader {
             entry_length: entry_length as u32,
             tail,
@@ -261,36 +309,114 @@ fn round_up_sector(n: usize) -> usize {
     (n + LOG_SECTOR_SIZE - 1) & !(LOG_SECTOR_SIZE - 1)
 }
 
-/// Walk the log region, find the longest chain of contiguous valid
-/// entries with matching log_guid + strictly increasing sequence
-/// numbers, and return them in apply order.
+/// The entry that starts at exactly `offset`, if discovery found one.
+fn entry_starting_at(found: &[LogEntry], offset: usize) -> Option<&LogEntry> {
+    found
+        .iter()
+        .find(|e| e.log_offset_in_region == offset as u64)
+}
+
+/// Collect the entries that may be replayed, in apply order.
 ///
-/// Returns an empty vec when the log_guid is all-zero (spec sentinel
-/// for "log is empty"), when the log region is missing, or when no
-/// valid entries are found.
+/// Discovery scans the whole region, because an entry can be anywhere
+/// in it. Selection then walks forward from the chain's start and stops
+/// at the first slot that is not a valid continuation, so the result is
+/// always a prefix of one chain and never a set of survivors gathered
+/// from either side of a break.
+///
+/// Returns an empty vec when `expected_log_guid` is all-zero (the spec
+/// sentinel for "log is empty"), when the log region is missing, when
+/// the region holds no entry of this chain, or when the chain's own
+/// start cannot be located.
 pub fn collect_replay_chain(log_bytes: &[u8], expected_log_guid: &[u8; 16]) -> Vec<LogEntry> {
     if expected_log_guid.iter().all(|b| *b == 0) {
         return Vec::new();
     }
-    // Pass 1: parse every 4 KiB slot we find an entry header in.
-    let mut entries: Vec<LogEntry> = Vec::new();
+
+    // Pass 1 — discovery. Probe every 4 KiB slot and never stop early.
+    // An entry can sit anywhere in the region: the log is a circular
+    // buffer, and this crate's own writer splices wherever it finds
+    // room without recording where. Discovery only establishes what is
+    // present; it decides nothing about what gets applied.
+    let mut found: Vec<LogEntry> = Vec::new();
     let mut pos = 0usize;
     while pos + LOG_SECTOR_SIZE <= log_bytes.len() {
-        if let Some(e) = parse_log_entry(log_bytes, pos, expected_log_guid) {
-            let len = e.header.entry_length as usize;
-            entries.push(e);
-            pos += len;
-        } else {
-            pos += LOG_SECTOR_SIZE;
+        match parse_log_entry(log_bytes, pos, expected_log_guid) {
+            Ok(entry) => {
+                pos += entry.header.entry_length as usize;
+                found.push(entry);
+            }
+            // A refused slot tells us nothing trustworthy about how far
+            // whatever is there extends, so step one sector and probe
+            // again rather than believing a length we just rejected.
+            Err(_) => pos += LOG_SECTOR_SIZE,
         }
     }
-    if entries.is_empty() {
-        return entries;
+    if found.is_empty() {
+        return found;
     }
-    // Pass 2: sort by sequence_number, drop dupes, return as chain.
-    entries.sort_by_key(|e| e.header.sequence_number);
-    entries.dedup_by_key(|e| e.header.sequence_number);
-    entries
+
+    // Pass 2 — the head. The active chain ends at the highest sequence
+    // number present. On a tie the entry at the lower log offset wins:
+    // two entries claiming one sequence number means one of them is
+    // stale, and `found` is in ascending offset order, so the strict
+    // `>` below keeps the first one seen. That tie-break is arbitrary,
+    // but it is now written down.
+    let mut head = &found[0];
+    for entry in &found[1..] {
+        if entry.header.sequence_number > head.header.sequence_number {
+            head = entry;
+        }
+    }
+
+    // Pass 3 — where the chain starts. `tail` is the head's own
+    // statement of where its sequence began, which is the field the
+    // format provides so that a replayer does not have to guess. Using
+    // it is what keeps an older chain still lying in the region, or a
+    // chain that does not begin at offset 0, from being mistaken for
+    // part of this one.
+    //
+    // If it resolves to nothing we found, we do not guess. The caller
+    // erases the log region and marks the image clean the moment a
+    // chain comes back, so falling back to whatever entry sits lowest
+    // in the region would let a stale chain be applied and destroy the
+    // live one on its way out. Replaying nothing leaves the log intact
+    // for a reader that can make sense of it.
+    let Some(first) = entry_starting_at(&found, head.header.tail as usize) else {
+        return Vec::new();
+    };
+    let start = first.log_offset_in_region as usize;
+
+    // Pass 4 — the walk, and the stop. Each entry must sit immediately
+    // after its predecessor and carry exactly the next sequence number.
+    // The first slot that fails either test ends the chain, whatever
+    // the reason: a torn entry, a foreign one, a gap in the sequence,
+    // or simply the end of what was written.
+    let mut chain: Vec<LogEntry> = Vec::new();
+    let mut pos = start;
+    let mut expected_sequence: Option<u64> = None;
+    while let Some(entry) = entry_starting_at(&found, pos) {
+        if let Some(wanted) = expected_sequence {
+            if entry.header.sequence_number != wanted {
+                break;
+            }
+        }
+        pos += entry.header.entry_length as usize;
+        // The region is circular: an entry ending exactly at its end is
+        // followed by one at offset 0. Sequence numbers rise by one at
+        // every step, so no entry can be reached twice and the walk
+        // terminates whether or not it goes round.
+        if pos >= log_bytes.len() {
+            pos -= log_bytes.len();
+        }
+        let next = entry.header.sequence_number.checked_add(1);
+        chain.push(entry.clone());
+        match next {
+            Some(n) => expected_sequence = Some(n),
+            None => break,
+        }
+    }
+    chain
 }
 
 /// Apply the descriptors of a log chain to the underlying device. Each
@@ -472,5 +598,349 @@ mod tests {
         let log_bytes = vec![0u8; 1024 * 1024];
         let chain = collect_replay_chain(&log_bytes, &[0u8; 16]);
         assert!(chain.is_empty());
+    }
+
+    // -----------------------------------------------------------------
+    // Chain-shape fixtures.
+    //
+    // Every entry below is a one-descriptor entry, so each occupies
+    // exactly two 4 KiB sectors: one for the header + descriptor table,
+    // one for the paired data sector. Laying them back to back at
+    // multiples of that length is the shape the format calls a
+    // contiguous chain, and it is what the replay walk has to follow.
+    // -----------------------------------------------------------------
+
+    const TEST_REGION_LEN: usize = 1024 * 1024;
+    const ONE_WRITE_ENTRY_LEN: usize = 2 * LOG_SECTOR_SIZE;
+    const LIVE_GUID: [u8; 16] = [0x42u8; 16];
+    const FOREIGN_GUID: [u8; 16] = [0x99u8; 16];
+
+    /// Device offset that entry `seq` in a fixture chain writes to.
+    /// Distinct per sequence number so a replayed entry is identifiable
+    /// by where it landed.
+    fn target_of(seq: u64) -> u64 {
+        4 * 1024 * 1024 + seq * LOG_SECTOR_SIZE as u64
+    }
+
+    /// A one-descriptor entry that writes a `seq`-derived fill pattern
+    /// at `target_of(seq)`.
+    fn one_write_entry(seq: u64, tail: u32, guid: &[u8; 16]) -> Vec<u8> {
+        encode_entry(
+            seq,
+            tail,
+            guid,
+            0,
+            0,
+            &[PendingWrite {
+                file_offset: target_of(seq),
+                sector: vec![0x10u8.wrapping_add(seq as u8); LOG_SECTOR_SIZE],
+            }],
+        )
+    }
+
+    fn splice(region: &mut [u8], off: usize, entry: &[u8]) {
+        region[off..off + entry.len()].copy_from_slice(entry);
+    }
+
+    /// Region holding sequences `1..=count` back to back from offset 0,
+    /// all in the live chain, all advertising `tail = 0`.
+    fn contiguous_chain(count: u64) -> Vec<u8> {
+        let mut region = vec![0u8; TEST_REGION_LEN];
+        for seq in 1..=count {
+            let off = (seq as usize - 1) * ONE_WRITE_ENTRY_LEN;
+            splice(&mut region, off, &one_write_entry(seq, 0, &LIVE_GUID));
+        }
+        region
+    }
+
+    fn sequences(chain: &[LogEntry]) -> Vec<u64> {
+        chain.iter().map(|e| e.header.sequence_number).collect()
+    }
+
+    fn replayed_offsets(chain: &[LogEntry]) -> Vec<u64> {
+        chain
+            .iter()
+            .flat_map(|e| e.descriptors.iter())
+            .map(|d| match d {
+                Descriptor::Data { file_offset, .. } => *file_offset,
+                Descriptor::Zero { file_offset, .. } => *file_offset,
+            })
+            .collect()
+    }
+
+    /// In-memory device so a chain can be applied and the resulting
+    /// bytes inspected — the only way to state "the successors were not
+    /// written" as an assertion about the device rather than about the
+    /// chain.
+    struct MemDevice(std::sync::Mutex<Vec<u8>>);
+
+    impl MemDevice {
+        fn filled(len: usize, fill: u8) -> Arc<dyn BlockDevice> {
+            Arc::new(MemDevice(std::sync::Mutex::new(vec![fill; len])))
+        }
+        fn byte_at(dev: &Arc<dyn BlockDevice>, off: u64) -> u8 {
+            let mut b = [0u8; 1];
+            fs_core::BlockRead::read_at(dev.as_ref(), off, &mut b).unwrap();
+            b[0]
+        }
+    }
+
+    impl fs_core::BlockRead for MemDevice {
+        fn read_at(&self, offset: u64, buf: &mut [u8]) -> fs_core::Result<()> {
+            let m = self.0.lock().unwrap();
+            let start = offset as usize;
+            buf.copy_from_slice(&m[start..start + buf.len()]);
+            Ok(())
+        }
+        fn size_bytes(&self) -> u64 {
+            self.0.lock().unwrap().len() as u64
+        }
+    }
+
+    impl BlockDevice for MemDevice {
+        fn write_at(&self, offset: u64, buf: &[u8]) -> fs_core::Result<()> {
+            let mut m = self.0.lock().unwrap();
+            let start = offset as usize;
+            m[start..start + buf.len()].copy_from_slice(buf);
+            Ok(())
+        }
+        fn is_writable(&self) -> bool {
+            true
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // What replay must do.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn contiguous_multi_entry_chain_replays_in_full() {
+        let region = contiguous_chain(4);
+        let chain = collect_replay_chain(&region, &LIVE_GUID);
+        assert_eq!(sequences(&chain), vec![1, 2, 3, 4]);
+        assert_eq!(
+            replayed_offsets(&chain),
+            (1..=4).map(target_of).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn torn_entry_ends_the_chain_and_its_successors_are_dropped() {
+        let mut region = contiguous_chain(4);
+        // Tear entry 3: flip a byte inside its data sector. The entry
+        // header still says "loge" and still claims its length, but the
+        // CRC no longer covers what is there — exactly what a crash
+        // partway through writing an entry leaves behind.
+        region[2 * ONE_WRITE_ENTRY_LEN + LOG_SECTOR_SIZE + 100] ^= 0xFF;
+
+        let chain = collect_replay_chain(&region, &LIVE_GUID);
+        assert_eq!(
+            sequences(&chain),
+            vec![1, 2],
+            "replay must stop at the torn entry, not step over it"
+        );
+        assert!(
+            !replayed_offsets(&chain).contains(&target_of(4)),
+            "entry 4 follows the tear and must not be applied"
+        );
+    }
+
+    #[test]
+    fn successors_of_a_torn_entry_never_reach_the_device() {
+        let mut region = contiguous_chain(4);
+        region[2 * ONE_WRITE_ENTRY_LEN + LOG_SECTOR_SIZE + 100] ^= 0xFF;
+
+        let dev = MemDevice::filled(8 * 1024 * 1024, 0xCC);
+        apply_chain(&dev, &collect_replay_chain(&region, &LIVE_GUID)).unwrap();
+
+        assert_eq!(MemDevice::byte_at(&dev, target_of(1)), 0x11);
+        assert_eq!(MemDevice::byte_at(&dev, target_of(2)), 0x12);
+        assert_eq!(
+            MemDevice::byte_at(&dev, target_of(3)),
+            0xCC,
+            "the torn entry itself must not be applied"
+        );
+        assert_eq!(
+            MemDevice::byte_at(&dev, target_of(4)),
+            0xCC,
+            "applying entry 4 without entry 3 is the state the log exists to prevent"
+        );
+    }
+
+    #[test]
+    fn a_sequence_gap_ends_the_chain() {
+        let mut region = contiguous_chain(4);
+        // Re-stamp the third slot with sequence 9 instead of 3.
+        splice(
+            &mut region,
+            2 * ONE_WRITE_ENTRY_LEN,
+            &one_write_entry(9, 0, &LIVE_GUID),
+        );
+        let chain = collect_replay_chain(&region, &LIVE_GUID);
+        assert_eq!(sequences(&chain), vec![1, 2]);
+    }
+
+    #[test]
+    fn a_foreign_chain_entry_ends_the_chain() {
+        let mut region = contiguous_chain(4);
+        // Third slot holds a perfectly valid entry belonging to some
+        // other log_guid. It is not ours to replay, and it breaks the
+        // run, so nothing after it is ours to replay either.
+        splice(
+            &mut region,
+            2 * ONE_WRITE_ENTRY_LEN,
+            &one_write_entry(3, 0, &FOREIGN_GUID),
+        );
+        let chain = collect_replay_chain(&region, &LIVE_GUID);
+        assert_eq!(sequences(&chain), vec![1, 2]);
+    }
+
+    #[test]
+    fn tail_anchors_the_chain_past_an_older_one_in_the_same_region() {
+        // Live chain (5, 6) at the start of the region, announcing
+        // tail = 0. Sequences 1 and 2 are left over from an earlier
+        // chain that used the same log_guid and were never overwritten.
+        let mut region = vec![0u8; TEST_REGION_LEN];
+        splice(&mut region, 0, &one_write_entry(5, 0, &LIVE_GUID));
+        splice(
+            &mut region,
+            ONE_WRITE_ENTRY_LEN,
+            &one_write_entry(6, 0, &LIVE_GUID),
+        );
+        splice(
+            &mut region,
+            4 * ONE_WRITE_ENTRY_LEN,
+            &one_write_entry(1, 4 * ONE_WRITE_ENTRY_LEN as u32, &LIVE_GUID),
+        );
+        splice(
+            &mut region,
+            5 * ONE_WRITE_ENTRY_LEN,
+            &one_write_entry(2, 4 * ONE_WRITE_ENTRY_LEN as u32, &LIVE_GUID),
+        );
+
+        let chain = collect_replay_chain(&region, &LIVE_GUID);
+        assert_eq!(sequences(&chain), vec![5, 6]);
+        let applied = replayed_offsets(&chain);
+        assert!(!applied.contains(&target_of(1)));
+        assert!(!applied.contains(&target_of(2)));
+    }
+
+    #[test]
+    fn a_chain_starting_away_from_offset_zero_is_found_via_tail() {
+        // Nothing at the head of the region; the chain begins three
+        // entries in and says so in `tail`.
+        let start = 3 * ONE_WRITE_ENTRY_LEN;
+        let mut region = vec![0u8; TEST_REGION_LEN];
+        splice(
+            &mut region,
+            start,
+            &one_write_entry(1, start as u32, &LIVE_GUID),
+        );
+        splice(
+            &mut region,
+            start + ONE_WRITE_ENTRY_LEN,
+            &one_write_entry(2, start as u32, &LIVE_GUID),
+        );
+
+        let chain = collect_replay_chain(&region, &LIVE_GUID);
+        assert_eq!(sequences(&chain), vec![1, 2]);
+        assert_eq!(chain[0].log_offset_in_region, start as u64);
+    }
+
+    #[test]
+    fn a_chain_that_wraps_the_end_of_the_region_is_followed_round() {
+        // Sequences 1 and 2 fill the last two entry slots and 3 lands
+        // back at offset 0. Cutting the chain at the wrap would apply
+        // 1 and 2, then erase the region holding 3 — losing a committed
+        // entry rather than declining to replay a doubtful one.
+        let start = TEST_REGION_LEN - 2 * ONE_WRITE_ENTRY_LEN;
+        let mut region = vec![0u8; TEST_REGION_LEN];
+        splice(
+            &mut region,
+            start,
+            &one_write_entry(1, start as u32, &LIVE_GUID),
+        );
+        splice(
+            &mut region,
+            TEST_REGION_LEN - ONE_WRITE_ENTRY_LEN,
+            &one_write_entry(2, start as u32, &LIVE_GUID),
+        );
+        splice(
+            &mut region,
+            0,
+            &one_write_entry(3, start as u32, &LIVE_GUID),
+        );
+
+        let chain = collect_replay_chain(&region, &LIVE_GUID);
+        assert_eq!(sequences(&chain), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn an_unlocatable_chain_start_replays_nothing() {
+        // The head says its sequence began at the second slot, and that
+        // slot is torn. Where this chain starts is now unknowable, and
+        // the entry still sitting at offset 0 belongs to a run the head
+        // has disowned. Replaying it would apply a stale write and then
+        // let the caller erase the log that still holds the real chain.
+        let mut region = contiguous_chain(4);
+        splice(
+            &mut region,
+            3 * ONE_WRITE_ENTRY_LEN,
+            &one_write_entry(4, ONE_WRITE_ENTRY_LEN as u32, &LIVE_GUID),
+        );
+        region[ONE_WRITE_ENTRY_LEN + LOG_SECTOR_SIZE + 7] ^= 0xFF;
+
+        assert!(collect_replay_chain(&region, &LIVE_GUID).is_empty());
+    }
+
+    /// Hand-built entry carrying a single "zero" descriptor. The
+    /// encoder only emits "desc" descriptors, so the only way to cover
+    /// the zeroing half of replay is to lay the bytes down here.
+    fn zero_descriptor_entry(seq: u64, guid: &[u8; 16], file_offset: u64, len: u64) -> Vec<u8> {
+        let mut buf = vec![0u8; LOG_SECTOR_SIZE];
+        buf[0..4].copy_from_slice(LOG_ENTRY_SIGNATURE);
+        buf[8..12].copy_from_slice(&(LOG_SECTOR_SIZE as u32).to_le_bytes());
+        buf[12..16].copy_from_slice(&0u32.to_le_bytes());
+        buf[16..24].copy_from_slice(&seq.to_le_bytes());
+        buf[24..28].copy_from_slice(&1u32.to_le_bytes());
+        buf[32..48].copy_from_slice(guid);
+        let d = LOG_ENTRY_HEADER_SIZE;
+        buf[d..d + 4].copy_from_slice(ZERO_DESC_SIGNATURE);
+        buf[d + 8..d + 16].copy_from_slice(&len.to_le_bytes());
+        buf[d + 16..d + 24].copy_from_slice(&file_offset.to_le_bytes());
+        buf[d + 24..d + 32].copy_from_slice(&seq.to_le_bytes());
+        let crc = entry_crc(&buf);
+        buf[4..8].copy_from_slice(&crc.to_le_bytes());
+        buf
+    }
+
+    #[test]
+    fn zero_descriptor_parses_and_zeroes_its_span() {
+        let mut region = vec![0u8; TEST_REGION_LEN];
+        splice(
+            &mut region,
+            0,
+            &zero_descriptor_entry(1, &LIVE_GUID, 2 * 1024 * 1024, 8192),
+        );
+
+        let chain = collect_replay_chain(&region, &LIVE_GUID);
+        assert_eq!(chain.len(), 1);
+        match &chain[0].descriptors[0] {
+            Descriptor::Zero {
+                zero_length,
+                file_offset,
+                ..
+            } => {
+                assert_eq!(*zero_length, 8192);
+                assert_eq!(*file_offset, 2 * 1024 * 1024);
+            }
+            _ => panic!("expected a zero descriptor"),
+        }
+
+        let dev = MemDevice::filled(4 * 1024 * 1024, 0xCC);
+        apply_chain(&dev, &chain).unwrap();
+        assert_eq!(MemDevice::byte_at(&dev, 2 * 1024 * 1024), 0);
+        assert_eq!(MemDevice::byte_at(&dev, 2 * 1024 * 1024 + 8191), 0);
+        assert_eq!(MemDevice::byte_at(&dev, 2 * 1024 * 1024 + 8192), 0xCC);
     }
 }
