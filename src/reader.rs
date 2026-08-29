@@ -104,6 +104,32 @@ impl HeaderSlot {
     }
 }
 
+/// Smallest payload block size the VHDX specification permits.
+const MIN_BLOCK_SIZE: u32 = 1024 * 1024;
+
+/// Largest payload block size the VHDX specification permits.
+const MAX_BLOCK_SIZE: u32 = 256 * 1024 * 1024;
+
+/// The message for a BAT entry in a reserved payload state.
+///
+/// `Error::Unsupported` carries `&'static str`, and this used to be
+/// satisfied with `Box::leak(format!(...))` — which leaks a small
+/// allocation every time, on a path an attacker reaches by writing a
+/// reserved state into a BAT entry.
+///
+/// No allocation is needed. States 0, 1, 2, 3, 6 and 7 are all defined,
+/// so `Reserved` can only ever hold 4 or 5; the set is closed and the
+/// strings can be static. The fallback exists because `Reserved` is a
+/// `u8` and nothing in the type stops a future decoder change widening
+/// what reaches it.
+fn reserved_state_message(v: u8) -> &'static str {
+    match v {
+        4 => "BAT entry reserved state 4",
+        5 => "BAT entry reserved state 5",
+        _ => "BAT entry in a reserved payload state",
+    }
+}
+
 impl VhdxReader {
     /// Open `path` read-only. The underlying file is wrapped in a
     /// best-effort `FileDevice` — the host file is opened RW when
@@ -211,7 +237,7 @@ impl VhdxReader {
         if !file_params.block_size.is_power_of_two() {
             return Err(Error::Corrupt("block_size not a power of two"));
         }
-        if file_params.block_size < 1024 * 1024 || file_params.block_size > 256 * 1024 * 1024 {
+        if file_params.block_size < MIN_BLOCK_SIZE || file_params.block_size > MAX_BLOCK_SIZE {
             return Err(Error::Corrupt("block_size outside [1 MiB, 256 MiB]"));
         }
         if !sector_size.is_power_of_two() {
@@ -325,12 +351,20 @@ impl VhdxReader {
                     .ok_or(Error::Corrupt("BAT index out of range"))?
             };
 
+            // Every variant is named. The previous `s if s.zero_fill()`
+            // arm plus `_ => unreachable!()` hid exhaustiveness from the
+            // compiler, so adding a PayloadState variant would have
+            // become a runtime panic on attacker-supplied bytes rather
+            // than a build failure.
             match entry.state {
                 PayloadState::FullyPresent => {
                     let host_off = entry.file_offset + in_block;
                     self.dev_read(host_off, dst)?;
                 }
-                s if s.zero_fill() => {
+                PayloadState::NotPresent
+                | PayloadState::Undefined
+                | PayloadState::Zero
+                | PayloadState::Unmapped => {
                     dst.fill(0);
                 }
                 PayloadState::PartiallyPresent => {
@@ -339,11 +373,8 @@ impl VhdxReader {
                     ));
                 }
                 PayloadState::Reserved(v) => {
-                    return Err(Error::Unsupported(Box::leak(
-                        format!("BAT entry reserved state {v}").into_boxed_str(),
-                    )));
+                    return Err(Error::Unsupported(reserved_state_message(v)));
                 }
-                _ => unreachable!(),
             }
 
             cursor += chunk_len as u64;
@@ -417,7 +448,31 @@ impl VhdxReader {
 
             let host_block_off = match entry.state {
                 PayloadState::FullyPresent => entry.file_offset,
-                _ => self.allocate_block_for(bat_idx, &entry)?,
+
+                // Nothing on disk yet, or defined to read as zero: a
+                // fresh zero-initialised block is exactly right.
+                PayloadState::NotPresent
+                | PayloadState::Undefined
+                | PayloadState::Zero
+                | PayloadState::Unmapped => self.allocate_block_for(bat_idx)?,
+
+                // NOT allocatable. A partially-present block has payload
+                // on disk whose valid sectors are described by a bitmap
+                // this crate does not walk — `read_at` refuses it for
+                // that reason. Allocating a fresh block here would
+                // publish a zeroed one over it and DISCARD those
+                // sectors, which is worse than refusing: the reader
+                // admits it cannot interpret the block, so the writer
+                // must not overwrite it either.
+                PayloadState::PartiallyPresent => {
+                    return Err(Error::Unsupported(
+                        "write to a PartiallyPresent block (sector-bitmap walking not implemented)",
+                    ));
+                }
+
+                PayloadState::Reserved(v) => {
+                    return Err(Error::Unsupported(reserved_state_message(v)));
+                }
             };
 
             // Direct payload write into the (possibly newly-allocated,
@@ -441,7 +496,7 @@ impl VhdxReader {
     /// Allocate a fresh host block for `bat_idx` at the device tail,
     /// zero-init it, journal the BAT mutation through the log, then
     /// publish the BAT entry. Returns the host offset of the new block.
-    fn allocate_block_for(&self, bat_idx: usize, _old: &BatEntry) -> Result<u64> {
+    fn allocate_block_for(&self, bat_idx: usize) -> Result<u64> {
         let block_size = self.block_size as u64;
 
         // Pick a block-aligned offset at the device tail.
@@ -496,9 +551,25 @@ impl VhdxReader {
     /// Write a 4 KiB sector image through the log: bump the header's
     /// sequence_number into the *other* header slot with a fresh
     /// log_guid, encode a one-descriptor log entry, splice it into the
-    /// log region, flush. After this returns the device is committed
-    /// to applying the sector — a crash before the in-place write
-    /// completes will be recovered by replay on next open.
+    /// log region, flush.
+    ///
+    /// # It does not always journal, and returns `Ok` when it does not
+    ///
+    /// Two conditions make it fall back to writing without a log: a log
+    /// region too small to hold one entry (absent, or under 8 KiB), and
+    /// an entry larger than the whole region. Both return `Ok(())`,
+    /// which a caller cannot distinguish from a journalled write.
+    ///
+    /// So the crash guarantee is conditional: WHERE THIS JOURNALS, a
+    /// crash before the in-place write completes is recovered by replay
+    /// on next open. Where it skips, the write is not crash-safe and
+    /// nothing says so at the call site.
+    ///
+    /// The fallback is deliberate — refusing the write outright would
+    /// make images with a small log unwritable, and most have at least
+    /// 1 MiB. Whether silence is the right way to report it is a design
+    /// question this comment does not settle; it only stops the
+    /// contract claiming more than the code delivers.
     fn journal_sector_write(&self, file_offset: u64, sector: &[u8]) -> Result<()> {
         debug_assert_eq!(sector.len(), LOG_SECTOR_SIZE);
 
