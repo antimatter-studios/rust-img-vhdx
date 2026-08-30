@@ -23,6 +23,7 @@
 //!  28   4  required (bit 0 = required-by-this-impl)
 //! ```
 
+use crate::endian::{read_u32_le, read_u64_le};
 use crate::error::{Error, Result};
 
 /// Largest `entry_count` the region table header may declare.
@@ -112,23 +113,6 @@ pub fn compute_crc(bytes: &[u8]) -> u32 {
     buf.copy_from_slice(&bytes[..REGION_TABLE_SIZE]);
     buf[4..8].fill(0);
     crc32c::crc32c(&buf)
-}
-
-fn read_u32_le(b: &[u8], off: usize) -> u32 {
-    u32::from_le_bytes([b[off], b[off + 1], b[off + 2], b[off + 3]])
-}
-
-fn read_u64_le(b: &[u8], off: usize) -> u64 {
-    u64::from_le_bytes([
-        b[off],
-        b[off + 1],
-        b[off + 2],
-        b[off + 3],
-        b[off + 4],
-        b[off + 5],
-        b[off + 6],
-        b[off + 7],
-    ])
 }
 
 #[cfg(test)]

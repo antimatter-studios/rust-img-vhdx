@@ -10,6 +10,8 @@
 
 pub mod bat;
 pub mod capi;
+/// Little-endian field reads, shared by every parser here.
+mod endian;
 pub mod error;
 pub mod header;
 pub mod log;

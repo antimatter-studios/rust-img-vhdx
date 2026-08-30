@@ -66,6 +66,7 @@
 //! The region is circular, so a chain whose entries run off the end of
 //! it is followed round to offset 0 rather than cut short there.
 
+use crate::endian::{read_u32_le, read_u64_le};
 use crate::error::{Error, Result};
 use fs_core::BlockDevice;
 use std::sync::Arc;
@@ -151,22 +152,6 @@ fn entry_crc(bytes: &[u8]) -> u32 {
     let mut tmp = bytes.to_vec();
     tmp[4..8].fill(0);
     crc32c::crc32c(&tmp)
-}
-
-fn read_u32_le(b: &[u8], off: usize) -> u32 {
-    u32::from_le_bytes([b[off], b[off + 1], b[off + 2], b[off + 3]])
-}
-fn read_u64_le(b: &[u8], off: usize) -> u64 {
-    u64::from_le_bytes([
-        b[off],
-        b[off + 1],
-        b[off + 2],
-        b[off + 3],
-        b[off + 4],
-        b[off + 5],
-        b[off + 6],
-        b[off + 7],
-    ])
 }
 
 /// Try to parse one log entry starting at `pos` inside `log_bytes`.
