@@ -362,3 +362,48 @@ fn write_to_a_partially_present_block_is_refused() {
     drop(r);
     let _ = std::fs::remove_file(&path);
 }
+
+/// The in-block offset reaches the host file, and is not silently
+/// collapsed to the start of the block.
+///
+/// Every other write test here reads back through the same reader, so
+/// an error in the virtual→host offset arithmetic that applies equally
+/// to `read_at` and `write_at` cancels out and the round-trip still
+/// passes. That is a real risk now the arithmetic is one shared
+/// definition (`block_chunks`) rather than two copies: one bug can no
+/// longer disagree with itself.
+///
+/// So this asserts against the raw file instead — an oracle the reader
+/// has no hand in. The payload must land at `host_block + in_block`,
+/// and the bytes at the block's start must still be the original
+/// pattern.
+#[test]
+fn a_write_lands_at_its_in_block_offset_in_the_host_file() {
+    let path = tmp_path("in_block_offset");
+    let block0 = pattern_block(1);
+    build_big_vhdx(&path, &block0);
+
+    // Deliberately not sector 0, and not sector-table-aligned either.
+    const IN_BLOCK: u64 = 3 * 4096 + 512;
+    let payload = [0x5Au8; 512];
+
+    let r = VhdxReader::open_rw(&path).unwrap();
+    r.write_at(IN_BLOCK, &payload).unwrap();
+    drop(r);
+
+    let raw = std::fs::read(&path).unwrap();
+    let at = |off: u64| &raw[off as usize..off as usize + payload.len()];
+
+    assert_eq!(
+        at(BIG_DATA_BLOCK0_OFFSET + IN_BLOCK),
+        &payload,
+        "payload must be written at the block's host offset plus the in-block offset"
+    );
+    assert_eq!(
+        at(BIG_DATA_BLOCK0_OFFSET),
+        &block0[..payload.len()],
+        "the start of the block must be untouched — an in-block offset \
+         collapsed to zero would have overwritten exactly this"
+    );
+    let _ = std::fs::remove_file(&path);
+}

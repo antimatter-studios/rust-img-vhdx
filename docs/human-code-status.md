@@ -51,12 +51,14 @@ The parameter is gone as well, which is what the finding asked for.
 [#24](https://github.com/antimatter-studios/rust-img-vhdx/pull/24) — replay now
 stops at the first break in the chain.
 
-### H2 — `parse_log_entry` collapses eleven rejection reasons into `None` — **fixable, not yet done**
+### H2 — `parse_log_entry` collapses eleven rejection reasons into `None` — **fixed**
 
-Real: eleven distinct ways an entry is rejected, all reported as "not an entry",
-so a genuinely corrupt log is indistinguishable from an empty slot. Fixing it
-means designing the error type the scanner should return and threading it
-through the slot walk. Worth its own change.
+This entry was stale: it was fixed while H1 was being worked on, and never
+re-marked. `EntryReject` (`src/log.rs`) now names four outcomes — `Empty`,
+`Corrupt`, `ForeignChain`, `Malformed` — and the eleven rejection sites each
+pick one. Only two of the twelve uses are `Empty`, which is the point: an empty
+slot and a corrupt entry are no longer the same answer, and replay can stop on
+one while skipping the other.
 
 ### H3 — `journal_sector_write` skips journalling silently — **fixed (the contract)**
 
@@ -118,13 +120,31 @@ clippy noticing.
 
 ### M14 — unused `_old` parameter — **fixed**, see above.
 
-### M1, M9, M13 — duplication in `read_at`/`write_at`, header picking, zero-fill — **fixable, not yet done**
+### M1, M9, M13 — duplication in `read_at`/`write_at`, header picking, zero-fill — **fixed**
 
-All three are genuine and mechanical. `read_at`/`write_at` share ~30 lines of
-block-walk; `pick_header`/`pick_region_table` share four near-identical probe
-blocks; the chunked zero-fill is written twice with its own chunk size each
-time. Deferred as one change about deduplication, with the synthetic tests as
-the contract — not folded into a pass that is mostly comments and names.
+All three were genuine and mechanical, and all three are now single definitions:
+
+- **M1** — `read_at`/`write_at` shared a fifteen-line prologue and an
+  eleven-line block-walk. They are now `transfer_end` (bounds and the
+  differencing refusal, whose message is the one real difference and is now an
+  argument), `block_chunks` (the virtual→host arithmetic, returning named
+  `BlockChunk`s), and `bat_entry_at` (the scoped BAT lookup, with the reason
+  the scope matters: `write_at` would deadlock against `allocate_block_for`).
+- **M9** — `probe_at` replaces the four probe blocks in `pick_header` and
+  `pick_region_table`, and documents why a *parse* failure is deliberately not
+  an error there while an *I/O* failure is.
+- **M13** — `write_zeros` with a single `ZERO_CHUNK`. It returns
+  `fs_core::Error` so each caller still maps to its own variant (`Error::Io`
+  against `Error::LogReplay`) — that mapping was the only real difference
+  between the two copies.
+
+**Consolidating M1 cost detectability, and that needed a new test.** Breaking
+the in-block offset in either old copy failed tests; breaking the one shared
+definition failed *fewer*, because every write test read back through the same
+reader and the identical error on both sides cancelled out. `synthetic.rs`'s
+`a_write_lands_at_its_in_block_offset_in_the_host_file` asserts against the raw
+file instead — an oracle the reader has no hand in — which takes the mutation
+from 3 failing tests back to 4.
 
 ### M4 — `read_uNN_le` copy-pasted nine times across four modules — **fixed**
 
@@ -172,23 +192,32 @@ These are the fields that answer "where does the active chain start" and "how
 far has it been flushed". H1 is fixed, so the immediate consequence is gone;
 whether to use them or drop them depends on how far replay should go.
 
-### M8 — an undocumented cross-module invariant — **fixable, not yet done**
+### M8 — an undocumented cross-module invariant — **fixed**
 
-The writer's correctness depends on `collect_replay_chain` scanning
-exhaustively, which `log.rs` never states. Now that H1 has changed replay, this
-comment needs re-checking against what replay actually does — worth doing with
-M7.
+Re-checked against what replay does after H1, and it holds: `journal_sector_write`
+splices an entry wherever it finds room and records nowhere that it did, which is
+only safe because `collect_replay_chain` probes every 4 KiB slot and never stops
+early. Both halves now say so, and the writer's half — the one that would not
+notice the invariant breaking — names the plausible change that would break it
+(an early exit at the first empty slot, which looks like an optimisation for a
+circular buffer).
 
-### M10 — the GUID-derivation idiom appears three times, unexplained — **fixable, not yet done**
+### M10 — the GUID-derivation idiom appears three times, unexplained — **fixed**
 
-Why byte 8, why XOR, and why the result is an acceptable GUID (it is not any
-UUID algorithm) are all unexplained. Documenting it needs the reasoning
-recovered first.
+One `stir_sequence_into_guid`, with the reasoning recovered and written down:
+it is **not** any UUID algorithm, and does not need to be — VHDX asks only that
+the value *change* when the file is opened for writing, so a reader holding a
+cached copy can tell it is stale. Byte 8 because the sequence number lives at
+header offset 8..16, so the two halves line up in a hex dump. XOR because it is
+reversible and so cannot collapse two distinct sequence numbers onto one GUID.
+The all-zero guard because all-zero is the spec's "no write in progress"
+sentinel — a derived GUID must never land on it. Three tests pin exactly those
+three properties.
 
 ---
 
 ## Verification
 
-`cargo test` — 46 unit (up from 43), 7 doc, 12 synthetic and 11 corruption tests
-pass. The new test fails against the previous behaviour, which is what makes it
-worth having.
+`cargo test` — 50 unit (up from 43), 7 doc, 13 synthetic and 11 corruption
+tests pass. Each new test fails against the previous behaviour, which is what
+makes it worth having.
