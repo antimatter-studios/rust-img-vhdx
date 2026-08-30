@@ -326,8 +326,6 @@ fn ro_open_rejects_write() {
 /// cannot interpret the block must not have a writer that overwrites it.
 #[test]
 fn write_to_a_partially_present_block_is_refused() {
-    use std::os::unix::fs::FileExt;
-
     let path = tmp_path("write_partially_present");
     let block0 = pattern_block(2);
     build_big_vhdx(&path, &block0);
@@ -336,7 +334,10 @@ fn write_to_a_partially_present_block_is_refused() {
     // real, block-aligned offset, so it is well-formed rather than
     // merely corrupt.
     {
-        let f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        // `WriteAt` is the portable seek-then-write in `tests/common`.
+        // The positional syscall it stands in for is Unix-only, and CI
+        // runs this on Windows too.
+        let mut f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
         let entry: u64 = ((BIG_DATA_BLOCK0_OFFSET >> 20) << 20) | 7;
         f.write_all_at(&entry.to_le_bytes(), BIG_BAT_OFFSET + 8)
             .unwrap();
