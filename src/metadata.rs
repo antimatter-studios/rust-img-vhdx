@@ -22,6 +22,7 @@
 //!  28   4  reserved
 //! ```
 
+use crate::endian::{read_u16_le, read_u32_le};
 use crate::error::{Error, Result};
 
 /// Largest `entry_count` the metadata table header may declare.
@@ -142,14 +143,6 @@ impl FileParameters {
     pub fn has_parent(&self) -> bool {
         self.flags & 0x2 != 0
     }
-}
-
-fn read_u16_le(b: &[u8], off: usize) -> u16 {
-    u16::from_le_bytes([b[off], b[off + 1]])
-}
-
-fn read_u32_le(b: &[u8], off: usize) -> u32 {
-    u32::from_le_bytes([b[off], b[off + 1], b[off + 2], b[off + 3]])
 }
 
 pub fn read_virtual_disk_size(bytes: &[u8]) -> Result<u64> {

@@ -126,9 +126,30 @@ blocks; the chunked zero-fill is written twice with its own chunk size each
 time. Deferred as one change about deduplication, with the synthetic tests as
 the contract — not folded into a pass that is mostly comments and names.
 
-### M4 — `read_uNN_le` copy-pasted nine times across four modules — **fixable, not yet done**
+### M4 — `read_uNN_le` copy-pasted nine times across four modules — **fixed**
 
-Well past the threshold. Same change as above.
+Nine byte-identical definitions of `read_u16_le` / `read_u32_le` / `read_u64_le`,
+private to `header`, `metadata`, `region_table` and `log`.
+
+Nothing was wrong with any of them, and that is worth recording: a helper this
+small is not duplicated because somebody misunderstood it, but because declaring
+it again is cheaper in the moment than importing it. The cost lands on a reader
+who has to check that the ninth copy still says `from_le_bytes` rather than
+`from_be_bytes` — a difference that changes every field the module parses and is
+one character wide.
+
+`src/endian.rs` holds one of each, and says why there is deliberately **no**
+big-endian half: VHDX is little-endian throughout, so a big-endian read here
+would be a bug, and a helper for it would make the bug spellable.
+
+**Coverage was already there and the probe proves it**, which is the reason this
+is safe rather than merely tidy. Flipping each copy to `from_be_bytes` in turn,
+before the change: `header` 2 tests, `metadata` 3, `region_table` 4, `log` 11.
+After, flipping the single helper fails **18**.
+
+Three tests on the module itself assert the byte order against literal bytes
+rather than against `from_le_bytes`, which would only restate the
+implementation.
 
 ### M3 — the BAT entry encoder is hand-rolled outside `bat.rs` — **needs your decision**
 
@@ -168,6 +189,6 @@ recovered first.
 
 ## Verification
 
-`cargo test` — 43 unit, 7 doc, 12 synthetic (up from 11) and 11 corruption tests
+`cargo test` — 46 unit (up from 43), 7 doc, 12 synthetic and 11 corruption tests
 pass. The new test fails against the previous behaviour, which is what makes it
 worth having.
