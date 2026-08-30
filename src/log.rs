@@ -420,19 +420,8 @@ pub fn apply_chain(dev: &Arc<dyn BlockDevice>, chain: &[LogEntry]) -> Result<()>
                     if *zero_length == 0 {
                         continue;
                     }
-                    // Write in <=1 MiB chunks so we don't blow up on a
-                    // pathological zero descriptor.
-                    let chunk = 1024 * 1024usize;
-                    let zeros = vec![0u8; chunk];
-                    let mut remaining = *zero_length;
-                    let mut off = *file_offset;
-                    while remaining > 0 {
-                        let n = std::cmp::min(remaining, chunk as u64) as usize;
-                        dev.write_at(off, &zeros[..n])
-                            .map_err(|e| Error::LogReplay(format!("zero write: {e}")))?;
-                        off += n as u64;
-                        remaining -= n as u64;
-                    }
+                    crate::reader::write_zeros(dev, *file_offset, *zero_length)
+                        .map_err(|e| Error::LogReplay(format!("zero write: {e}")))?;
                 }
                 Descriptor::Data {
                     file_offset,

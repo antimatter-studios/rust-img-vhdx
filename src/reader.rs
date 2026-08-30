@@ -311,10 +311,22 @@ impl VhdxReader {
         self.dev.flush().map_err(fs_core_to_vhdx_error)
     }
 
-    pub fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<()> {
-        let len = buf.len() as u64;
+    /// The end offset of a transfer, or an error saying why it cannot
+    /// happen. `None` means "nothing to do" — a zero-length transfer.
+    ///
+    /// `read_at` and `write_at` opened with the same fifteen lines, and
+    /// the only real difference was the sentence in the differencing
+    /// error. That sentence is the argument; everything else is one
+    /// definition now, so the two entry points cannot drift on which
+    /// offsets they consider in range.
+    fn transfer_end(
+        &self,
+        offset: u64,
+        len: u64,
+        no_parent_support: &'static str,
+    ) -> Result<Option<u64>> {
         if len == 0 {
-            return Ok(());
+            return Ok(None);
         }
         let end = offset
             .checked_add(len)
@@ -327,29 +339,78 @@ impl VhdxReader {
             });
         }
         if self.has_parent {
-            return Err(Error::Unsupported(
-                "VHDX with parent (differencing) — chain walking not implemented",
-            ));
+            return Err(Error::Unsupported(no_parent_support));
         }
+        Ok(Some(end))
+    }
 
+    /// The BAT entry for a block index, or `Corrupt` if the index is
+    /// past the table.
+    ///
+    /// Scoped so the lock is released before the caller touches the
+    /// device: holding the BAT mutex across an I/O would serialise
+    /// every reader on the slowest one, and `write_at` would deadlock
+    /// against `allocate_block_for`, which takes it again.
+    fn bat_entry_at(&self, bat_idx: usize) -> Result<BatEntry> {
+        let bat = self.bat.lock().unwrap();
+        bat.get(bat_idx)
+            .copied()
+            .ok_or(Error::Corrupt("BAT index out of range"))
+    }
+
+    /// Split `offset..end` into the pieces that fall in one block each.
+    ///
+    /// Returns, per piece: the byte offset within the block, the BAT
+    /// index that block lives at, and the piece's position and length
+    /// within the caller's buffer. The first piece may start mid-block
+    /// and the last may end mid-block; the ones between are whole
+    /// blocks.
+    ///
+    /// This is the arithmetic both `read_at` and `write_at` were doing
+    /// inline. Getting it wrong silently mis-addresses data rather than
+    /// failing, which is the kind of bug two copies can disagree on for
+    /// a long time without anyone noticing.
+    fn block_chunks(&self, offset: u64, end: u64) -> Result<Vec<BlockChunk>> {
         let block_size = self.block_size as u64;
         let block_mask = block_size - 1;
+        let mut chunks = Vec::new();
         let mut cursor = offset;
-        let mut written = 0usize;
-
+        let mut buf_pos = 0usize;
         while cursor < end {
             let in_block = cursor & block_mask;
             let virt_block_idx = cursor / block_size;
             let chunk_len = std::cmp::min(block_size - in_block, end - cursor) as usize;
-            let dst = &mut buf[written..written + chunk_len];
+            chunks.push(BlockChunk {
+                in_block,
+                bat_idx: data_bat_index(virt_block_idx, self.chunk_ratio) as usize,
+                buf_pos,
+                chunk_len,
+            });
+            cursor += chunk_len as u64;
+            buf_pos += chunk_len;
+        }
+        Ok(chunks)
+    }
 
-            let bat_idx = data_bat_index(virt_block_idx, self.chunk_ratio) as usize;
-            let entry = {
-                let bat = self.bat.lock().unwrap();
-                bat.get(bat_idx)
-                    .copied()
-                    .ok_or(Error::Corrupt("BAT index out of range"))?
-            };
+    pub fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<()> {
+        let Some(end) = self.transfer_end(
+            offset,
+            buf.len() as u64,
+            "VHDX with parent (differencing) — chain walking not implemented",
+        )?
+        else {
+            return Ok(());
+        };
+
+        for chunk in self.block_chunks(offset, end)? {
+            let BlockChunk {
+                in_block,
+                bat_idx,
+                buf_pos,
+                chunk_len,
+            } = chunk;
+            let dst = &mut buf[buf_pos..buf_pos + chunk_len];
+            let entry = self.bat_entry_at(bat_idx)?;
 
             // Every variant is named. The previous `s if s.zero_fill()`
             // arm plus `_ => unreachable!()` hid exhaustiveness from the
@@ -376,9 +437,6 @@ impl VhdxReader {
                     return Err(Error::Unsupported(reserved_state_message(v)));
                 }
             }
-
-            cursor += chunk_len as u64;
-            written += chunk_len;
         }
         Ok(())
     }
@@ -407,44 +465,24 @@ impl VhdxReader {
         if !self.writable {
             return Err(Error::ReadOnly);
         }
-        let len = buf.len() as u64;
-        if len == 0 {
+        let Some(end) = self.transfer_end(
+            offset,
+            buf.len() as u64,
+            "VHDX with parent (differencing) — write not implemented",
+        )?
+        else {
             return Ok(());
-        }
-        let end = offset
-            .checked_add(len)
-            .ok_or(Error::Corrupt("offset+len overflow"))?;
-        if end > self.virtual_size {
-            return Err(Error::OutOfBounds {
-                offset,
-                len,
-                size: self.virtual_size,
-            });
-        }
-        if self.has_parent {
-            return Err(Error::Unsupported(
-                "VHDX with parent (differencing) — write not implemented",
-            ));
-        }
+        };
 
-        let block_size = self.block_size as u64;
-        let block_mask = block_size - 1;
-        let mut cursor = offset;
-        let mut written = 0usize;
-
-        while cursor < end {
-            let in_block = cursor & block_mask;
-            let virt_block_idx = cursor / block_size;
-            let chunk_len = std::cmp::min(block_size - in_block, end - cursor) as usize;
-            let src = &buf[written..written + chunk_len];
-
-            let bat_idx = data_bat_index(virt_block_idx, self.chunk_ratio) as usize;
-            let entry = {
-                let bat = self.bat.lock().unwrap();
-                bat.get(bat_idx)
-                    .copied()
-                    .ok_or(Error::Corrupt("BAT index out of range"))?
-            };
+        for chunk in self.block_chunks(offset, end)? {
+            let BlockChunk {
+                in_block,
+                bat_idx,
+                buf_pos,
+                chunk_len,
+            } = chunk;
+            let src = &buf[buf_pos..buf_pos + chunk_len];
+            let entry = self.bat_entry_at(bat_idx)?;
 
             let host_block_off = match entry.state {
                 PayloadState::FullyPresent => entry.file_offset,
@@ -478,8 +516,6 @@ impl VhdxReader {
             // Direct payload write into the (possibly newly-allocated,
             // zero-initialised) host block.
             self.dev_write(host_block_off + in_block, src)?;
-            cursor += chunk_len as u64;
-            written += chunk_len;
         }
 
         self.dev_flush()?;
@@ -570,6 +606,20 @@ impl VhdxReader {
     /// 1 MiB. Whether silence is the right way to report it is a design
     /// question this comment does not settle; it only stops the
     /// contract claiming more than the code delivers.
+    ///
+    /// # What this depends on, in another module
+    ///
+    /// This splices an entry **wherever it finds room** in the log
+    /// region, and records nowhere that it did so. That is only safe
+    /// because [`crate::log::collect_replay_chain`] probes *every* slot
+    /// and never stops early — it says so, and this depends on it.
+    ///
+    /// If replay ever gained an early exit (stopping at the first empty
+    /// slot, say, which is a natural-looking optimisation for a
+    /// circular buffer), entries this writer placed after a gap would
+    /// stop being replayed, and the crash guarantee above would quietly
+    /// become false. The invariant lives in two modules; this half is
+    /// the one that would not notice it breaking.
     fn journal_sector_write(&self, file_offset: u64, sector: &[u8]) -> Result<()> {
         debug_assert_eq!(sector.len(), LOG_SECTOR_SIZE);
 
@@ -588,15 +638,7 @@ impl VhdxReader {
         // log_guid from it so both slots stay distinguishable.
         let new_seq = header.sequence_number.wrapping_add(1);
         let mut new_log_guid = header.log_guid;
-        // Stir the sequence number into the bottom 8 bytes so each
-        // active chain has a distinct GUID.
-        for (i, b) in new_seq.to_le_bytes().iter().enumerate() {
-            new_log_guid[8 + i] ^= *b;
-        }
-        // Make sure it isn't all-zero (the spec sentinel).
-        if new_log_guid.iter().all(|b| *b == 0) {
-            new_log_guid[0] = 1;
-        }
+        stir_sequence_into_guid(&mut new_log_guid, new_seq);
 
         // Encode a single-descriptor entry covering this sector.
         let dev_size = *self.dev_size.lock().unwrap();
@@ -636,11 +678,8 @@ impl VhdxReader {
         let mut new_header = header.clone();
         new_header.sequence_number = new_seq;
         new_header.log_guid = new_log_guid;
-        // Stir the sequence into file_write_guid + data_write_guid.
-        for (i, b) in new_seq.to_le_bytes().iter().enumerate() {
-            new_header.file_write_guid[8 + i] ^= *b;
-            new_header.data_write_guid[8 + i] ^= *b;
-        }
+        stir_sequence_into_guid(&mut new_header.file_write_guid, new_seq);
+        stir_sequence_into_guid(&mut new_header.data_write_guid, new_seq);
 
         let header_bytes = encode_header(&new_header);
         self.dev_write(next_slot.offset(), &header_bytes)?;
@@ -652,27 +691,99 @@ impl VhdxReader {
     }
 }
 
+/// Derive a fresh GUID by stirring `seq` into an existing one.
+///
+/// # What this is, and what it is not
+///
+/// It is **not** any UUID algorithm. VHDX asks only that
+/// `file_write_guid`, `data_write_guid` and `log_guid` **change** when
+/// the file is opened for writing, so that a reader which saw an older
+/// value knows its cached state is stale. It does not ask for
+/// randomness, uniqueness across machines, or an RFC 4122 shape — a
+/// value that differs from the last one is the whole requirement.
+///
+/// So: XOR the little-endian sequence number over bytes 8..16.
+///
+/// - **Byte 8** because the sequence number already lives at offset
+///   8..16 of the header, so the two halves stay aligned in a hex dump
+///   — the same eight bytes in both places.
+/// - **XOR** because it is reversible and cannot collapse: a distinct
+///   `seq` always yields a distinct result from the same input, so two
+///   consecutive writes cannot produce the same GUID.
+/// - **Not the top eight bytes**, which carry whatever the creating
+///   tool put there; leaving them alone keeps the value recognisable as
+///   descended from the original.
+///
+/// # The all-zero guard
+///
+/// All-zero is the spec's sentinel for *"no write in progress"*, so a
+/// derived GUID must never land on it — a `log_guid` of zero would tell
+/// the next opener there is no log to replay. It can only happen if the
+/// input was itself the XOR of `seq`, which is vanishingly unlikely and
+/// still worth refusing rather than hoping.
+/// One piece of a transfer that falls entirely inside a single block.
+///
+/// A transfer of any size crosses block boundaries; each crossing needs
+/// its own BAT lookup, because the blocks either side may be in
+/// different states and at unrelated host offsets. This names the four
+/// numbers that describe a piece so the walk reads as a walk instead of
+/// as arithmetic.
+struct BlockChunk {
+    /// Byte offset of this piece within its block.
+    in_block: u64,
+    /// Index of the BAT entry describing that block.
+    bat_idx: usize,
+    /// Where this piece starts in the caller's buffer.
+    buf_pos: usize,
+    /// How many bytes this piece covers.
+    chunk_len: usize,
+}
+
+fn stir_sequence_into_guid(guid: &mut [u8; 16], seq: u64) {
+    for (i, b) in seq.to_le_bytes().iter().enumerate() {
+        guid[8 + i] ^= *b;
+    }
+    if guid.iter().all(|b| *b == 0) {
+        guid[0] = 1;
+    }
+}
+
+/// Read `len` bytes at `off` and parse them, or `None`.
+///
+/// The four probe blocks in `pick_header` and `pick_region_table` were
+/// the same six lines each: bounds-check the offset against the device,
+/// read, parse, keep it only if it parsed.
+///
+/// A parse failure is deliberately **not** an error. Both structures
+/// are written in two copies precisely so one can be unreadable — a
+/// crash between the two writes leaves exactly that — and the caller's
+/// job is to prefer whichever survived. An I/O failure *is* an error,
+/// because it says nothing about the copy's contents.
+fn probe_at<T>(
+    dev: &Arc<dyn BlockDevice>,
+    dev_size: u64,
+    off: u64,
+    len: usize,
+    parse: impl Fn(&[u8]) -> Result<T>,
+) -> Result<Option<T>> {
+    if dev_size < off + len as u64 {
+        return Ok(None);
+    }
+    let mut buf = vec![0u8; len];
+    dev.read_at(off, &mut buf).map_err(fs_core_to_vhdx_error)?;
+    Ok(parse(&buf).ok())
+}
+
 fn pick_header(dev: &Arc<dyn BlockDevice>, dev_size: u64) -> Result<(Header, HeaderSlot)> {
-    let mut h1 = None;
-    let mut h2 = None;
-    if dev_size >= HEADER1_OFFSET + HEADER_SIZE as u64 {
-        let mut buf = vec![0u8; HEADER_SIZE];
-        dev.read_at(HEADER1_OFFSET, &mut buf)
-            .map_err(fs_core_to_vhdx_error)?;
-        if let Ok(h) = Header::parse(&buf) {
-            h1 = Some(h);
-        }
-    }
-    if dev_size >= HEADER2_OFFSET + HEADER_SIZE as u64 {
-        let mut buf = vec![0u8; HEADER_SIZE];
-        dev.read_at(HEADER2_OFFSET, &mut buf)
-            .map_err(fs_core_to_vhdx_error)?;
-        if let Ok(h) = Header::parse(&buf) {
-            h2 = Some(h);
-        }
-    }
+    let h1 = probe_at(dev, dev_size, HEADER1_OFFSET, HEADER_SIZE, Header::parse)?;
+    let h2 = probe_at(dev, dev_size, HEADER2_OFFSET, HEADER_SIZE, Header::parse)?;
     match (h1, h2) {
         (Some(a), Some(b)) => {
+            // On a tie, slot 1 wins. The two are written alternately
+            // and the sequence number is bumped on every write, so a
+            // tie means both copies describe the same state — either is
+            // correct, and picking one deterministically keeps the
+            // choice reproducible.
             if a.sequence_number >= b.sequence_number {
                 Ok((a, HeaderSlot::One))
             } else {
@@ -686,19 +797,8 @@ fn pick_header(dev: &Arc<dyn BlockDevice>, dev_size: u64) -> Result<(Header, Hea
 }
 
 fn pick_region_table(dev: &Arc<dyn BlockDevice>, dev_size: u64) -> Result<RegionTable> {
-    if dev_size >= REGION_TABLE1_OFFSET + REGION_TABLE_SIZE as u64 {
-        let mut buf = vec![0u8; REGION_TABLE_SIZE];
-        dev.read_at(REGION_TABLE1_OFFSET, &mut buf)
-            .map_err(fs_core_to_vhdx_error)?;
-        if let Ok(t) = RegionTable::parse(&buf) {
-            return Ok(t);
-        }
-    }
-    if dev_size >= REGION_TABLE2_OFFSET + REGION_TABLE_SIZE as u64 {
-        let mut buf = vec![0u8; REGION_TABLE_SIZE];
-        dev.read_at(REGION_TABLE2_OFFSET, &mut buf)
-            .map_err(fs_core_to_vhdx_error)?;
-        if let Ok(t) = RegionTable::parse(&buf) {
+    for off in [REGION_TABLE1_OFFSET, REGION_TABLE2_OFFSET] {
+        if let Some(t) = probe_at(dev, dev_size, off, REGION_TABLE_SIZE, RegionTable::parse)? {
             return Ok(t);
         }
     }
@@ -709,18 +809,43 @@ fn is_zero_guid(g: &[u8; 16]) -> bool {
     g.iter().all(|b| *b == 0)
 }
 
-fn zero_log_region(dev: &Arc<dyn BlockDevice>, off: u64, len: u32) -> Result<()> {
-    let chunk = 1024 * 1024usize;
-    let zeros = vec![0u8; chunk];
-    let mut remaining = len as u64;
+/// Largest single write used to zero a range.
+///
+/// A zero descriptor names a length taken straight off disk, and a log
+/// region can be megabytes; writing it in one call would allocate a
+/// buffer of whatever the file asked for. One megabyte is small enough
+/// that a pathological length costs time rather than memory, and large
+/// enough that the loop is not the cost.
+pub(crate) const ZERO_CHUNK: usize = 1024 * 1024;
+
+/// Write `len` zero bytes at `off`, in [`ZERO_CHUNK`]-sized writes.
+///
+/// The buffer is allocated once and re-sliced, rather than per chunk.
+///
+/// Errors come back as `fs_core`'s, because the two callers map them
+/// differently — the reader to `Error::Io`, the log replayer to
+/// `Error::LogReplay` with its own context. That difference is the only
+/// thing the two copies of this loop actually differed in, and it
+/// belongs to the caller.
+pub(crate) fn write_zeros(
+    dev: &Arc<dyn BlockDevice>,
+    off: u64,
+    len: u64,
+) -> std::result::Result<(), fs_core::Error> {
+    let zeros = vec![0u8; ZERO_CHUNK];
+    let mut remaining = len;
     let mut cur = off;
     while remaining > 0 {
-        let n = std::cmp::min(remaining, chunk as u64) as usize;
-        dev.write_at(cur, &zeros[..n])
-            .map_err(fs_core_to_vhdx_error)?;
+        let n = std::cmp::min(remaining, ZERO_CHUNK as u64) as usize;
+        dev.write_at(cur, &zeros[..n])?;
         cur += n as u64;
         remaining -= n as u64;
     }
+    Ok(())
+}
+
+fn zero_log_region(dev: &Arc<dyn BlockDevice>, off: u64, len: u32) -> Result<()> {
+    write_zeros(dev, off, len as u64).map_err(fs_core_to_vhdx_error)?;
     dev.flush().map_err(fs_core_to_vhdx_error)?;
     Ok(())
 }
@@ -813,5 +938,103 @@ fn fs_core_to_vhdx_error(e: fs_core::Error) -> Error {
             Error::OutOfBounds { offset, len, size }
         }
         fs_core::Error::Custom(s) => Error::LogReplay(s),
+    }
+}
+
+#[cfg(test)]
+mod shared_helper_tests {
+    use super::*;
+
+    /// The sequence number lands on bytes 8..16, and nowhere else.
+    ///
+    /// Not any UUID algorithm — VHDX asks only that the value *change*
+    /// when the file is opened for writing, so a reader with a cached
+    /// copy knows it is stale. These pin which bytes move and which do
+    /// not, because "the top eight stay put" is what keeps the value
+    /// recognisable as descended from the original.
+    #[test]
+    fn stirring_touches_only_the_bottom_eight_bytes() {
+        let mut g = [0xAAu8; 16];
+        stir_sequence_into_guid(&mut g, 0x0102_0304_0506_0708);
+        assert_eq!(&g[..8], &[0xAA; 8], "the top eight are untouched");
+        assert_eq!(
+            &g[8..],
+            &[0xA2, 0xAD, 0xAC, 0xAF, 0xAE, 0xA9, 0xA8, 0xAB],
+            "little-endian sequence, XORed over the bottom eight"
+        );
+    }
+
+    /// A distinct sequence always gives a distinct GUID.
+    ///
+    /// This is why XOR: it is reversible, so two consecutive writes
+    /// cannot land on the same value from the same input — which is the
+    /// entire requirement the format places on these fields.
+    #[test]
+    fn consecutive_sequences_cannot_collide() {
+        let base = [0x11u8; 16];
+        let mut seen = std::collections::HashSet::new();
+        for seq in 0..64u64 {
+            let mut g = base;
+            stir_sequence_into_guid(&mut g, seq);
+            assert!(seen.insert(g), "sequence {seq} repeated an earlier GUID");
+        }
+    }
+
+    /// All-zero is the spec's "no write in progress" sentinel, so a
+    /// derived GUID must never land on it — a zero `log_guid` tells the
+    /// next opener there is no log to replay.
+    #[test]
+    fn the_result_is_never_the_all_zero_sentinel() {
+        let seq = 0x0102_0304_0506_0708u64;
+        // The one input that would XOR to zero.
+        let mut g = [0u8; 16];
+        g[8..].copy_from_slice(&seq.to_le_bytes());
+        stir_sequence_into_guid(&mut g, seq);
+        assert!(g.iter().any(|b| *b != 0), "must not be the zero sentinel");
+    }
+
+    /// `write_zeros` writes the whole range, in bounded pieces.
+    #[test]
+    fn write_zeros_covers_the_range_it_is_given() {
+        struct Mem(std::sync::Mutex<Vec<u8>>);
+        impl fs_core::BlockRead for Mem {
+            fn read_at(&self, off: u64, buf: &mut [u8]) -> fs_core::Result<()> {
+                let b = self.0.lock().unwrap();
+                let s = off as usize;
+                buf.copy_from_slice(&b[s..s + buf.len()]);
+                Ok(())
+            }
+            fn size_bytes(&self) -> u64 {
+                self.0.lock().unwrap().len() as u64
+            }
+        }
+        impl BlockDevice for Mem {
+            fn write_at(&self, off: u64, buf: &[u8]) -> fs_core::Result<()> {
+                let mut b = self.0.lock().unwrap();
+                let s = off as usize;
+                b[s..s + buf.len()].copy_from_slice(buf);
+                Ok(())
+            }
+            fn is_writable(&self) -> bool {
+                true
+            }
+        }
+        let dev: Arc<dyn BlockDevice> = Arc::new(Mem(std::sync::Mutex::new(vec![
+            0xAAu8;
+            ZERO_CHUNK * 2
+                + 64
+        ])));
+        // Dirty the range first so zeroing is observable.
+        dev.write_at(0, &[0xFFu8; 128]).unwrap();
+        write_zeros(&dev, 0, (ZERO_CHUNK + 32) as u64).expect("zero");
+        let mut buf = vec![0xAAu8; 128];
+        dev.read_at(0, &mut buf).unwrap();
+        assert!(buf.iter().all(|b| *b == 0), "the head was zeroed");
+        let mut tail = vec![0xAAu8; 8];
+        dev.read_at((ZERO_CHUNK + 24) as u64, &mut tail).unwrap();
+        assert!(
+            tail.iter().all(|b| *b == 0),
+            "past one chunk was zeroed too"
+        );
     }
 }
