@@ -24,6 +24,10 @@
 
 use crate::error::{Error, Result};
 
+/// Largest `entry_count` the metadata table header may declare.
+/// Fixed by the VHDX specification.
+const MAX_METADATA_ENTRIES: usize = 2047;
+
 pub const METADATA_HEADER_SIZE: usize = 32;
 pub const METADATA_ENTRY_SIZE: usize = 32;
 pub const METADATA_SIGNATURE: &[u8; 8] = b"metadata";
@@ -77,7 +81,7 @@ impl MetadataTable {
             return Err(Error::BadMetadata("signature mismatch"));
         }
         let entry_count = read_u16_le(&bytes, 10) as usize;
-        if entry_count > 2047 {
+        if entry_count > MAX_METADATA_ENTRIES {
             return Err(Error::BadMetadata("entry_count > 2047"));
         }
         let total_entries_bytes = METADATA_HEADER_SIZE + entry_count * METADATA_ENTRY_SIZE;

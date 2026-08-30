@@ -222,7 +222,6 @@ fn parse_log_entry(log_bytes: &[u8], pos: usize, expected_log_guid: &[u8; 16]) -
     // to the next 4 KiB sector boundary. In practice the spec rounds
     // descriptors+header up to a sector boundary and then each "desc"
     // descriptor consumes one 4 KiB sector after it.
-    let mut data_sector_idx: usize = 0;
     let descriptors_end = LOG_ENTRY_HEADER_SIZE + descriptors_size;
     // First data sector starts at the next sector boundary after header
     // + descriptors. For the encoder we use (and for entries up to a
@@ -283,12 +282,10 @@ fn parse_log_entry(log_bytes: &[u8], pos: usize, expected_log_guid: &[u8; 16]) -
             });
 
             data_sector_base += LOG_SECTOR_SIZE;
-            data_sector_idx += 1;
         } else {
             return Err(EntryReject::Malformed);
         }
     }
-    let _ = data_sector_idx;
 
     Ok(LogEntry {
         header: LogEntryHeader {

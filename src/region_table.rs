@@ -25,6 +25,10 @@
 
 use crate::error::{Error, Result};
 
+/// Largest `entry_count` the region table header may declare.
+/// Fixed by the VHDX specification.
+const MAX_REGION_ENTRIES: usize = 2047;
+
 pub const REGION_TABLE_SIZE: usize = 64 * 1024;
 pub const REGION_TABLE1_OFFSET: u64 = 192 * 1024;
 pub const REGION_TABLE2_OFFSET: u64 = 256 * 1024;
@@ -75,7 +79,7 @@ impl RegionTable {
             });
         }
         let entry_count = read_u32_le(bytes, 8) as usize;
-        if entry_count > 2047 {
+        if entry_count > MAX_REGION_ENTRIES {
             return Err(Error::Corrupt("region-table entry_count > 2047"));
         }
 

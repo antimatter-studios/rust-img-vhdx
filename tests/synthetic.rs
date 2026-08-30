@@ -310,3 +310,55 @@ fn ro_open_rejects_write() {
     assert!(matches!(err, vhdx::Error::ReadOnly));
     let _ = std::fs::remove_file(&path);
 }
+
+/// Writing into a PartiallyPresent block is refused, not silently
+/// serviced by allocating a fresh one over it.
+///
+/// The block's payload is on disk and its valid sectors are described by
+/// a bitmap this crate does not walk — which is why `read_at` refuses
+/// the state outright. The write path used to catch it in a `_ =>` arm
+/// alongside the genuinely-empty states and hand it to
+/// `allocate_block_for`, publishing a zeroed block over it. That
+/// discards every sector the bitmap called valid, and does so while
+/// reporting success.
+///
+/// Refusing is the only consistent answer: a reader that admits it
+/// cannot interpret the block must not have a writer that overwrites it.
+#[test]
+fn write_to_a_partially_present_block_is_refused() {
+    let path = tmp_path("write_partially_present");
+    let block0 = pattern_block(2);
+    build_big_vhdx(&path, &block0);
+
+    // Re-stamp BAT entry 1 as PartiallyPresent (state 7) pointing at a
+    // real, block-aligned offset, so it is well-formed rather than
+    // merely corrupt.
+    {
+        // `WriteAt` is the portable seek-then-write in `tests/common`.
+        // The positional syscall it stands in for is Unix-only, and CI
+        // runs this on Windows too.
+        let mut f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        let entry: u64 = ((BIG_DATA_BLOCK0_OFFSET >> 20) << 20) | 7;
+        f.write_all_at(&entry.to_le_bytes(), BIG_BAT_OFFSET + 8)
+            .unwrap();
+    }
+
+    let r = VhdxReader::open_rw(&path).unwrap();
+    let virt_off = BIG_BLOCK_SIZE as u64; // start of block 1
+
+    let err = r
+        .write_at(virt_off, &[0xAAu8; 4096])
+        .expect_err("a PartiallyPresent block must not be overwritten by a fresh allocation");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("PartiallyPresent"),
+        "the refusal should name the state, got: {msg}"
+    );
+
+    // And the reader still refuses it too, so the two paths agree.
+    let mut buf = [0u8; 4096];
+    assert!(r.read_at(virt_off, &mut buf).is_err());
+
+    drop(r);
+    let _ = std::fs::remove_file(&path);
+}
