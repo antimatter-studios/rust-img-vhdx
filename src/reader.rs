@@ -130,6 +130,36 @@ fn reserved_state_message(v: u8) -> &'static str {
     }
 }
 
+/// The length of a region, once it is known to be inside the file.
+///
+/// Every region this reader loads whole -- the log, the metadata table,
+/// the BAT -- is located by an offset and a length that came out of the
+/// image, and each length is a `u32`, so each one can ask for 4 GiB.
+/// Sizing the buffer from the declared length alone means a file of a
+/// few kilobytes can ask for all three at once.
+///
+/// A region that does not fit inside the file it lives in is not a
+/// region, so the length is only usable once that has been established.
+/// The sibling VHD reader has kept this check since it was written; the
+/// numbers here are the same kind and had none.
+///
+/// `outside` is the message for a region that does not fit. It is
+/// static because `Error::Corrupt` carries a `&'static str`, and
+/// formatting one per failure would mean leaking a string for every
+/// hostile file.
+fn span_inside_the_file(
+    dev_size: u64,
+    offset: u64,
+    length: u64,
+    outside: &'static str,
+) -> Result<usize> {
+    let end = offset.checked_add(length).ok_or(Error::Corrupt(outside))?;
+    if end > dev_size {
+        return Err(Error::Corrupt(outside));
+    }
+    Ok(length as usize)
+}
+
 impl VhdxReader {
     /// Open `path` read-only. The underlying file is wrapped in a
     /// best-effort `FileDevice` — the host file is opened RW when
@@ -192,7 +222,15 @@ impl VhdxReader {
             if !replay_capable {
                 return Err(Error::ReadOnly);
             }
-            let mut log_bytes = vec![0u8; header.log_length as usize];
+            let mut log_bytes = vec![
+                0u8;
+                span_inside_the_file(
+                    dev_size,
+                    header.log_offset,
+                    u64::from(header.log_length),
+                    "log region reaches past the end of the file",
+                )?
+            ];
             dev.read_at(header.log_offset, &mut log_bytes)
                 .map_err(fs_core_to_vhdx_error)?;
             let chain = collect_replay_chain(&log_bytes, &header.log_guid);
@@ -214,7 +252,15 @@ impl VhdxReader {
         let metadata_entry = region_table
             .find(&guids::METADATA)
             .ok_or(Error::Corrupt("metadata region missing"))?;
-        let mut metadata_bytes = vec![0u8; metadata_entry.length as usize];
+        let mut metadata_bytes = vec![
+            0u8;
+            span_inside_the_file(
+                dev_size,
+                metadata_entry.file_offset,
+                u64::from(metadata_entry.length),
+                "metadata region reaches past the end of the file",
+            )?
+        ];
         dev.read_at(metadata_entry.file_offset, &mut metadata_bytes)
             .map_err(fs_core_to_vhdx_error)?;
         let metadata = MetadataTable::parse(metadata_bytes)?;
@@ -253,7 +299,15 @@ impl VhdxReader {
         let bat_region = region_table
             .find(&guids::BAT)
             .ok_or(Error::Corrupt("BAT region missing"))?;
-        let mut bat_bytes = vec![0u8; bat_region.length as usize];
+        let mut bat_bytes = vec![
+            0u8;
+            span_inside_the_file(
+                dev_size,
+                bat_region.file_offset,
+                u64::from(bat_region.length),
+                "BAT region reaches past the end of the file",
+            )?
+        ];
         dev.read_at(bat_region.file_offset, &mut bat_bytes)
             .map_err(fs_core_to_vhdx_error)?;
         let mut bat = Vec::with_capacity(bat_bytes.len() / 8);
@@ -297,6 +351,29 @@ impl VhdxReader {
 
     pub fn is_writable(&self) -> bool {
         self.writable
+    }
+
+    /// Where a block's payload sits in the host file, or a refusal.
+    ///
+    /// `file_offset` comes from a BAT entry, which is one 64-bit word
+    /// off the disk: `BatEntry::from_u64` keeps its top 44 bits as a
+    /// megabyte count, so the largest it can name is just under 2^64.
+    /// Adding the offset within the block -- up to 256 MiB -- wrapped,
+    /// and a wrapped offset is not a read that fails: it is a read that
+    /// succeeds somewhere else in the file and hands the caller
+    /// unrelated bytes as though they were the guest's.
+    fn host_offset(&self, file_offset: u64, in_block: u64, len: usize) -> Result<u64> {
+        let dev_size = *self.dev_size.lock().unwrap();
+        let start = file_offset
+            .checked_add(in_block)
+            .ok_or(Error::Corrupt("BAT entry names an offset past the file"))?;
+        let end = start
+            .checked_add(len as u64)
+            .ok_or(Error::Corrupt("BAT entry names an offset past the file"))?;
+        if end > dev_size {
+            return Err(Error::Corrupt("BAT entry names an offset past the file"));
+        }
+        Ok(start)
     }
 
     fn dev_read(&self, off: u64, buf: &mut [u8]) -> Result<()> {
@@ -419,7 +496,7 @@ impl VhdxReader {
             // than a build failure.
             match entry.state {
                 PayloadState::FullyPresent => {
-                    let host_off = entry.file_offset + in_block;
+                    let host_off = self.host_offset(entry.file_offset, in_block, dst.len())?;
                     self.dev_read(host_off, dst)?;
                 }
                 PayloadState::NotPresent
@@ -515,7 +592,8 @@ impl VhdxReader {
 
             // Direct payload write into the (possibly newly-allocated,
             // zero-initialised) host block.
-            self.dev_write(host_block_off + in_block, src)?;
+            let host_off = self.host_offset(host_block_off, in_block, src.len())?;
+            self.dev_write(host_off, src)?;
         }
 
         self.dev_flush()?;

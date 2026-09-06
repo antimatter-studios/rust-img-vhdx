@@ -407,3 +407,222 @@ fn a_write_lands_at_its_in_block_offset_in_the_host_file() {
     );
     let _ = std::fs::remove_file(&path);
 }
+
+/// Build a log entry carrying a single "zero" descriptor.
+///
+/// The encoder only emits "desc" descriptors, so the zeroing half of
+/// replay has to be laid down byte by byte. Layout is signature(4) +
+/// checksum(4) + entry_length(4) + tail(4) + sequence(8) +
+/// descriptor_count(4) + reserved(4) + log_guid(16), then the
+/// descriptor: "zero"(4) + reserved(4) + zero_length(8) +
+/// file_offset(8) + sequence(8).
+fn zero_descriptor_entry(seq: u64, guid: &[u8; 16], file_offset: u64, len: u64) -> Vec<u8> {
+    const SECTOR: usize = 4096;
+    const ENTRY_HEADER: usize = 64;
+    let mut buf = vec![0u8; SECTOR];
+    buf[0..4].copy_from_slice(b"loge");
+    buf[8..12].copy_from_slice(&(SECTOR as u32).to_le_bytes());
+    buf[16..24].copy_from_slice(&seq.to_le_bytes());
+    buf[24..28].copy_from_slice(&1u32.to_le_bytes());
+    buf[32..48].copy_from_slice(guid);
+    let d = ENTRY_HEADER;
+    buf[d..d + 4].copy_from_slice(b"zero");
+    buf[d + 8..d + 16].copy_from_slice(&len.to_le_bytes());
+    buf[d + 16..d + 24].copy_from_slice(&file_offset.to_le_bytes());
+    buf[d + 24..d + 32].copy_from_slice(&seq.to_le_bytes());
+    let crc = {
+        let mut tmp = buf.clone();
+        tmp[4..8].fill(0);
+        crc32c::crc32c(&tmp)
+    };
+    buf[4..8].copy_from_slice(&crc.to_le_bytes());
+    buf
+}
+
+/// Point the header at a live log so the next open replays it.
+fn arm_the_log(path: &std::path::PathBuf, entry: &[u8], log_guid: &[u8; 16]) {
+    let mut f = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .unwrap();
+    f.seek(SeekFrom::Start(BIG_LOG_OFFSET)).unwrap();
+    f.write_all(entry).unwrap();
+
+    let mut hdr = vec![0u8; HEADER_SIZE];
+    hdr[0..4].copy_from_slice(b"head");
+    hdr[8..16].copy_from_slice(&5u64.to_le_bytes());
+    hdr[48..64].copy_from_slice(log_guid);
+    hdr[66..68].copy_from_slice(&1u16.to_le_bytes());
+    hdr[68..72].copy_from_slice(&BIG_LOG_LENGTH.to_le_bytes());
+    hdr[72..80].copy_from_slice(&BIG_LOG_OFFSET.to_le_bytes());
+    let crc = {
+        let mut tmp = hdr.clone();
+        tmp[4..8].fill(0);
+        crc32c::crc32c(&tmp)
+    };
+    hdr[4..8].copy_from_slice(&crc.to_le_bytes());
+    f.seek(SeekFrom::Start(HEADER2_OFFSET)).unwrap();
+    f.write_all(&hdr).unwrap();
+    f.flush().unwrap();
+}
+
+/// Opening a file must not damage it.
+///
+/// `open` is the read-only entry point, and it takes the host file
+/// read-write when it can, because a dirty VHDX has to be replayed
+/// before its region table, metadata and BAT mean anything. That makes
+/// every log descriptor in the file a write request, and the two
+/// numbers a "zero" descriptor carries -- where to start and how much
+/// to erase -- came out of the same file.
+///
+/// What the reader did with them: erased from byte 0 for as far as the
+/// descriptor asked, growing the file to make room, and then returned
+/// "no valid VHDX region table found" -- so the caller was told the
+/// file was not a VHDX, and not that it had just been overwritten.
+#[test]
+fn a_read_only_open_does_not_let_the_log_erase_the_file() {
+    let path = tmp_path("hostile_zero_span");
+    let block0 = pattern_block(9);
+    build_big_vhdx(&path, &block0);
+
+    let size_before = std::fs::metadata(&path).unwrap().len();
+    let mut before = vec![0u8; 4096];
+    {
+        use std::io::Read;
+        let mut f = std::fs::File::open(&path).unwrap();
+        f.seek(SeekFrom::Start(BIG_DATA_BLOCK0_OFFSET)).unwrap();
+        f.read_exact(&mut before).unwrap();
+    }
+
+    let log_guid = [0x99u8; 16];
+    // From the very start of the file, for eight times its length.
+    arm_the_log(
+        &path,
+        &zero_descriptor_entry(2, &log_guid, 0, BIG_TOTAL_FILE_SIZE * 8),
+        &log_guid,
+    );
+
+    let outcome = VhdxReader::open(&path);
+    assert!(
+        outcome.is_err(),
+        "a log naming a span eight times the length of the file was accepted"
+    );
+
+    let size_after = std::fs::metadata(&path).unwrap().len();
+    assert_eq!(
+        size_before, size_after,
+        "the file grew from {size_before} to {size_after} bytes -- the \
+         replay wrote past the end of it"
+    );
+
+    let mut after = vec![0u8; 4096];
+    {
+        use std::io::Read;
+        let mut f = std::fs::File::open(&path).unwrap();
+        f.seek(SeekFrom::Start(BIG_DATA_BLOCK0_OFFSET)).unwrap();
+        f.read_exact(&mut after).unwrap();
+    }
+    assert_eq!(before, after, "the image's first data block was erased");
+
+    let _ = std::fs::remove_file(&path);
+}
+
+/// The log, the metadata table and the BAT are each located by an
+/// offset and a `u32` length that came out of the image, and each is
+/// read whole into a buffer sized from that length alone. A file of a
+/// few kilobytes could ask for 4 GiB three times over.
+///
+/// The sibling VHD reader has always checked that its BAT fits inside
+/// the file it lives in. These are the same kind of number.
+#[test]
+fn a_region_claiming_more_than_the_file_is_refused() {
+    for (which, entry_offset) in [("BAT", 16u64), ("metadata", 16 + 32)] {
+        let path = tmp_path(&format!("oversized_{which}"));
+        let block0 = pattern_block(11);
+        build_big_vhdx(&path, &block0);
+
+        {
+            let mut f = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .unwrap();
+            let mut rt = vec![0u8; REGION_TABLE_SIZE];
+            {
+                use std::io::Read;
+                f.seek(SeekFrom::Start(REGION_TABLE1_OFFSET)).unwrap();
+                f.read_exact(&mut rt).unwrap();
+            }
+            let len_at = (entry_offset + 24) as usize;
+            rt[len_at..len_at + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+            let crc = {
+                let mut tmp = rt.clone();
+                tmp[4..8].fill(0);
+                crc32c::crc32c(&tmp)
+            };
+            rt[4..8].copy_from_slice(&crc.to_le_bytes());
+            for at in [REGION_TABLE1_OFFSET, REGION_TABLE2_OFFSET] {
+                f.seek(SeekFrom::Start(at)).unwrap();
+                f.write_all(&rt).unwrap();
+            }
+            f.flush().unwrap();
+        }
+
+        // The open fails either way -- reading 4 GiB out of a 64 MiB
+        // file comes up short. What is being asserted is that it is
+        // refused by name, before the buffer is allocated and the read
+        // is issued, rather than by the read running out of file.
+        let outcome = VhdxReader::open(&path);
+        let why = format!("{:?}", outcome.as_ref().err());
+        assert!(
+            why.contains("past the end of the file"),
+            "a {which} region of 4 GiB in a 64 MiB file was refused as {why}, \
+             which means the buffer was allocated and read first"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
+/// A BAT entry is one 64-bit word off the disk. `BatEntry::from_u64`
+/// keeps its top 44 bits as a megabyte count, so the largest host
+/// offset it can name is just under 2^64, and the reader added the
+/// offset within the block to it and read there.
+///
+/// Past the end of the file that produced a short read, which at least
+/// failed. Above `2^64 - block_size` it wrapped, and a wrapped offset
+/// does not fail: it reads somewhere else in the file and hands the
+/// caller those bytes as the guest's. (The wrap needs a block larger
+/// than 1 MiB to reach; the bound below is what stops both.)
+#[test]
+fn a_bat_entry_pointing_past_the_file_is_refused_by_name() {
+    let path = tmp_path("bat_past_file");
+    let block0 = pattern_block(12);
+    build_big_vhdx(&path, &block0);
+
+    {
+        let mut f = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        // FullyPresent (state 6) at the highest megabyte-aligned offset
+        // the encoding can express.
+        let entry: u64 = 0xFFFF_FFFF_FFF0_0000 | 6;
+        f.seek(SeekFrom::Start(BIG_BAT_OFFSET)).unwrap();
+        f.write_all(&entry.to_le_bytes()).unwrap();
+        f.flush().unwrap();
+    }
+
+    let r = VhdxReader::open(&path).unwrap();
+    let mut buf = vec![0u8; 4096];
+    let why = format!("{:?}", r.read_at(0, &mut buf).err());
+    assert!(
+        why.contains("past the file"),
+        "a BAT entry at offset 2^64 - 1 MiB was refused as {why}, which means \
+         the read was issued at that offset rather than refused"
+    );
+
+    drop(r);
+    let _ = std::fs::remove_file(&path);
+}

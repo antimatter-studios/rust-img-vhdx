@@ -148,10 +148,15 @@ pub struct LogEntry {
 }
 
 /// Compute CRC-32C of an entry buffer with the checksum field zeroed.
+///
+/// In three pieces rather than over a zeroed copy: discovery checksums
+/// every candidate slot, and copying each one first meant an allocation
+/// the size of whatever length the slot declared -- up to the whole log
+/// region, for a slot that was about to be rejected.
 fn entry_crc(bytes: &[u8]) -> u32 {
-    let mut tmp = bytes.to_vec();
-    tmp[4..8].fill(0);
-    crc32c::crc32c(&tmp)
+    let crc = crc32c::crc32c(&bytes[0..4]);
+    let crc = crc32c::crc32c_append(crc, &[0u8; 4]);
+    crc32c::crc32c_append(crc, &bytes[8..])
 }
 
 /// Try to parse one log entry starting at `pos` inside `log_bytes`.
@@ -159,7 +164,12 @@ fn entry_crc(bytes: &[u8]) -> u32 {
 /// The error says *why* the slot was refused. `Empty` means keep
 /// looking; the other three mean something was written here that cannot
 /// be replayed, which the caller must not treat as an empty slot.
-fn parse_log_entry(log_bytes: &[u8], pos: usize, expected_log_guid: &[u8; 16]) -> ParseOutcome {
+fn parse_log_entry(
+    log_bytes: &[u8],
+    pos: usize,
+    expected_log_guid: &[u8; 16],
+    checksum_budget: &mut usize,
+) -> ParseOutcome {
     if pos + LOG_SECTOR_SIZE > log_bytes.len() {
         return Err(EntryReject::Empty);
     }
@@ -174,6 +184,34 @@ fn parse_log_entry(log_bytes: &[u8], pos: usize, expected_log_guid: &[u8; 16]) -
     {
         return Err(EntryReject::Corrupt);
     }
+    // The GUID sits inside the first sector, so a slot belonging to
+    // some other chain is rejected without checksumming the length it
+    // declared. The checksum is the expensive part of a probe and this
+    // is the one field that can rule a slot out before paying it.
+    let mut log_guid = [0u8; 16];
+    log_guid.copy_from_slice(&head[32..48]);
+    if &log_guid != expected_log_guid {
+        return Err(EntryReject::ForeignChain);
+    }
+
+    // A probe checksums as many bytes as the slot claims to be long,
+    // and a slot that claims to reach the end of the region costs the
+    // whole region. Discovery steps one sector after a refusal, so
+    // every sector of a region filled with such slots pays that in
+    // turn: the work is quadratic in the region's length. Measured
+    // before this budget existed: 4 MiB of log took 143 ms, 32 MiB took
+    // 12.6 s, and `log_length` is a u32, so 4 GiB would have taken
+    // days -- on the plain read-only open.
+    //
+    // The budget is what a well-formed region can honestly need. Its
+    // entries tile it without overlapping, so discovery checksums each
+    // byte about once; four times that leaves room for a region that is
+    // partly rewritten without leaving room for the quadratic case.
+    if *checksum_budget < entry_length {
+        return Err(EntryReject::Corrupt);
+    }
+    *checksum_budget -= entry_length;
+
     let entry_bytes = &log_bytes[pos..pos + entry_length];
     let stored_crc = read_u32_le(entry_bytes, 4);
     if stored_crc != entry_crc(entry_bytes) {
@@ -183,14 +221,8 @@ fn parse_log_entry(log_bytes: &[u8], pos: usize, expected_log_guid: &[u8; 16]) -
     let tail = read_u32_le(entry_bytes, 12);
     let sequence_number = read_u64_le(entry_bytes, 16);
     let descriptor_count = read_u32_le(entry_bytes, 24);
-    let mut log_guid = [0u8; 16];
-    log_guid.copy_from_slice(&entry_bytes[32..48]);
     let flushed_file_offset = read_u64_le(entry_bytes, 48);
     let last_file_offset = read_u64_le(entry_bytes, 56);
-
-    if &log_guid != expected_log_guid {
-        return Err(EntryReject::ForeignChain);
-    }
 
     // Descriptors live immediately after the 64-byte header.
     let Some(descriptors_size) = (descriptor_count as usize).checked_mul(LOG_DESCRIPTOR_SIZE)
@@ -310,20 +342,29 @@ fn entry_starting_at(found: &[LogEntry], offset: usize) -> Option<&LogEntry> {
 /// sentinel for "log is empty"), when the log region is missing, when
 /// the region holds no entry of this chain, or when the chain's own
 /// start cannot be located.
-pub fn collect_replay_chain(log_bytes: &[u8], expected_log_guid: &[u8; 16]) -> Vec<LogEntry> {
-    if expected_log_guid.iter().all(|b| *b == 0) {
-        return Vec::new();
-    }
+/// How many times over discovery may checksum the log region.
+///
+/// See the budget note in `parse_log_entry` for what this stops.
+pub const DISCOVERY_CHECKSUM_PASSES: usize = 4;
 
-    // Pass 1 — discovery. Probe every 4 KiB slot and never stop early.
-    // An entry can sit anywhere in the region: the log is a circular
-    // buffer, and this crate's own writer splices wherever it finds
-    // room without recording where. Discovery only establishes what is
-    // present; it decides nothing about what gets applied.
+/// Probe every slot in the region and return what is there, along with
+/// how many bytes were checksummed doing it.
+///
+/// Split out from [`collect_replay_chain`] so the budget is testable:
+/// the number returned is the work the budget bounds, and a test can
+/// assert on it rather than on how long the call took.
+fn discover(log_bytes: &[u8], expected_log_guid: &[u8; 16]) -> (Vec<LogEntry>, usize) {
+    // Probe every 4 KiB slot and never stop early. An entry can sit
+    // anywhere in the region: the log is a circular buffer, and this
+    // crate's own writer splices wherever it finds room without
+    // recording where. Discovery only establishes what is present; it
+    // decides nothing about what gets applied.
+    let allowance = log_bytes.len().saturating_mul(DISCOVERY_CHECKSUM_PASSES);
+    let mut budget = allowance;
     let mut found: Vec<LogEntry> = Vec::new();
     let mut pos = 0usize;
     while pos + LOG_SECTOR_SIZE <= log_bytes.len() {
-        match parse_log_entry(log_bytes, pos, expected_log_guid) {
+        match parse_log_entry(log_bytes, pos, expected_log_guid, &mut budget) {
             Ok(entry) => {
                 pos += entry.header.entry_length as usize;
                 found.push(entry);
@@ -334,6 +375,16 @@ pub fn collect_replay_chain(log_bytes: &[u8], expected_log_guid: &[u8; 16]) -> V
             Err(_) => pos += LOG_SECTOR_SIZE,
         }
     }
+    (found, allowance - budget)
+}
+
+pub fn collect_replay_chain(log_bytes: &[u8], expected_log_guid: &[u8; 16]) -> Vec<LogEntry> {
+    if expected_log_guid.iter().all(|b| *b == 0) {
+        return Vec::new();
+    }
+
+    // Pass 1 — discovery.
+    let (found, _checksummed) = discover(log_bytes, expected_log_guid);
     if found.is_empty() {
         return found;
     }
@@ -409,6 +460,55 @@ pub fn collect_replay_chain(log_bytes: &[u8], expected_log_guid: &[u8; 16]) -> V
 /// reader will pick up from the next valid sequence number on the next
 /// open.
 pub fn apply_chain(dev: &Arc<dyn BlockDevice>, chain: &[LogEntry]) -> Result<()> {
+    // WHERE EACH DESCRIPTOR LANDS, BEFORE ANY OF THEM LAND.
+    //
+    // A descriptor says where on the device to write and how much, and
+    // both numbers came out of the image. Replay runs on `open` --
+    // including a read-only open, which takes the host file read-write
+    // when it can, because a dirty VHDX has to be replayed before its
+    // region table, metadata and BAT mean anything. So merely handing
+    // this reader a file is enough to ask it to write.
+    //
+    // Against a file-backed device a write past the end is not an
+    // error: the file grows. A "zero" descriptor starting at 0 and
+    // running for eight times the file's length erased the image and
+    // grew it to eight times its size, and `open` then reported "no
+    // valid VHDX region table found" -- so the caller was told the file
+    // was not a VHDX, and not that it had just been overwritten.
+    //
+    // The whole chain is checked before the first write. A span that
+    // leaves the device means the log is not describing this device,
+    // and a partly-applied chain is precisely the damage: descriptors
+    // one and two are as destructive as the one that got caught.
+    let dev_size = dev.size_bytes();
+    for entry in chain {
+        for d in &entry.descriptors {
+            let (file_offset, length) = match d {
+                Descriptor::Zero {
+                    zero_length,
+                    file_offset,
+                    ..
+                } => (*file_offset, *zero_length),
+                Descriptor::Data {
+                    file_offset,
+                    sector,
+                    ..
+                } => (*file_offset, sector.len() as u64),
+            };
+            let end = file_offset.checked_add(length).ok_or_else(|| {
+                Error::LogReplay(format!(
+                    "descriptor at {file_offset} spans {length} bytes, which overflows"
+                ))
+            })?;
+            if end > dev_size {
+                return Err(Error::LogReplay(format!(
+                    "descriptor writes {length} bytes at {file_offset}, ending at {end} \
+                     on a device of {dev_size} bytes"
+                )));
+            }
+        }
+    }
+
     for entry in chain {
         for d in &entry.descriptors {
             match d {
@@ -913,5 +1013,161 @@ mod tests {
         assert_eq!(MemDevice::byte_at(&dev, 2 * 1024 * 1024), 0);
         assert_eq!(MemDevice::byte_at(&dev, 2 * 1024 * 1024 + 8191), 0);
         assert_eq!(MemDevice::byte_at(&dev, 2 * 1024 * 1024 + 8192), 0xCC);
+    }
+
+    /// A descriptor names where on the device to write, and that
+    /// number comes out of the image.
+    ///
+    /// Replay runs on `open`, including a read-only open -- the reader
+    /// takes the host file read-write when it can, because a dirty
+    /// VHDX has to be replayed before its BAT and metadata mean
+    /// anything. So a descriptor pointing off the end of the device is
+    /// a write somebody gets by handing over a file, and against a
+    /// file-backed device it is not even an error: the file grows.
+    ///
+    /// A span that leaves the device means the log is not describing
+    /// this device, so nothing in the chain is applied. Refusing the
+    /// whole chain rather than the one descriptor is the point -- a
+    /// partly-applied chain is the damage.
+    /// Discovery probes every slot, and a probe costs a checksum over
+    /// whatever length the slot declares. A region whose every sector
+    /// declares that it runs to the end of the region therefore costs
+    /// the region's length, once per sector -- quadratic work on the
+    /// read-only open path, where `log_length` is a u32 and so the
+    /// region can be 4 GiB.
+    ///
+    /// The assertion is on bytes checksummed rather than on elapsed
+    /// time, because that is what the budget actually bounds and it
+    /// does not depend on how loaded the machine is.
+    #[test]
+    fn a_region_of_overlapping_claims_is_checksummed_a_bounded_number_of_times() {
+        const REGION: usize = 4 * 1024 * 1024;
+        let mut region = vec![0u8; REGION];
+        // Every sector: a well-formed header claiming to reach the end
+        // of the region, carrying the live GUID, with a checksum that
+        // will not match.
+        for pos in (0..REGION).step_by(LOG_SECTOR_SIZE) {
+            let len = (REGION - pos) as u32;
+            region[pos..pos + 4].copy_from_slice(LOG_ENTRY_SIGNATURE);
+            region[pos + 8..pos + 12].copy_from_slice(&len.to_le_bytes());
+            region[pos + 32..pos + 48].copy_from_slice(&LIVE_GUID);
+        }
+
+        let (found, checksummed) = discover(&region, &LIVE_GUID);
+        assert!(found.is_empty(), "none of those slots is a valid entry");
+        assert!(
+            checksummed <= REGION * DISCOVERY_CHECKSUM_PASSES,
+            "discovery checksummed {checksummed} bytes of a {REGION}-byte region, \
+             which is {:.1} times over",
+            checksummed as f64 / REGION as f64
+        );
+    }
+
+    /// The budget must not cost a well-formed region its entries: a log
+    /// whose entries tile it is checksummed about once through.
+    #[test]
+    fn a_well_formed_region_stays_well_inside_the_budget() {
+        let region = contiguous_chain(4);
+        let (found, checksummed) = discover(&region, &LIVE_GUID);
+        assert_eq!(sequences(&found), vec![1, 2, 3, 4]);
+        assert!(
+            checksummed <= region.len(),
+            "a tiling region checksummed {checksummed} bytes of {}",
+            region.len()
+        );
+    }
+
+    #[test]
+    fn a_zero_span_running_past_the_device_is_refused_before_anything_is_written() {
+        let mut region = vec![0u8; TEST_REGION_LEN];
+        // Starts inside the device and runs off the end of it.
+        splice(
+            &mut region,
+            0,
+            &zero_descriptor_entry(1, &LIVE_GUID, 2 * 1024 * 1024, u64::MAX),
+        );
+        let chain = collect_replay_chain(&region, &LIVE_GUID);
+        assert_eq!(chain.len(), 1, "the entry itself is well formed");
+
+        let dev = MemDevice::filled(4 * 1024 * 1024, 0xCC);
+        assert!(
+            apply_chain(&dev, &chain).is_err(),
+            "replay accepted a span of u64::MAX bytes on a 4 MiB device"
+        );
+        assert_eq!(
+            MemDevice::byte_at(&dev, 2 * 1024 * 1024),
+            0xCC,
+            "the refused span was written anyway, up to where the device ended"
+        );
+    }
+
+    #[test]
+    fn a_zero_span_starting_past_the_device_is_refused() {
+        let mut region = vec![0u8; TEST_REGION_LEN];
+        splice(
+            &mut region,
+            0,
+            &zero_descriptor_entry(1, &LIVE_GUID, 1 << 40, 4096),
+        );
+        let chain = collect_replay_chain(&region, &LIVE_GUID);
+        let dev = MemDevice::filled(4 * 1024 * 1024, 0xCC);
+        assert!(apply_chain(&dev, &chain).is_err());
+    }
+
+    #[test]
+    fn a_data_sector_past_the_device_is_refused() {
+        let mut sector = vec![0xABu8; LOG_SECTOR_SIZE];
+        sector[0..8].copy_from_slice(&0u64.to_le_bytes());
+        sector[LOG_SECTOR_SIZE - 4..].copy_from_slice(&0u32.to_le_bytes());
+        let entry = encode_entry(
+            1,
+            0,
+            &LIVE_GUID,
+            0,
+            0,
+            &[PendingWrite {
+                file_offset: 1 << 40,
+                sector,
+            }],
+        );
+        let mut region = vec![0u8; TEST_REGION_LEN];
+        splice(&mut region, 0, &entry);
+        let chain = collect_replay_chain(&region, &LIVE_GUID);
+        assert_eq!(chain.len(), 1, "the entry itself is well formed");
+
+        let dev = MemDevice::filled(4 * 1024 * 1024, 0xCC);
+        assert!(
+            apply_chain(&dev, &chain).is_err(),
+            "replay wrote a sector at byte 2^40 of a 4 MiB device"
+        );
+    }
+
+    /// The refusal has to come before the first write, not part way
+    /// through: a chain whose first descriptor is fine and whose second
+    /// is not must leave the device as it found it.
+    #[test]
+    fn a_chain_with_one_bad_descriptor_applies_none_of_it() {
+        let mut region = vec![0u8; TEST_REGION_LEN];
+        splice(
+            &mut region,
+            0,
+            &zero_descriptor_entry(1, &LIVE_GUID, 1024 * 1024, 4096),
+        );
+        splice(
+            &mut region,
+            LOG_SECTOR_SIZE,
+            &zero_descriptor_entry(2, &LIVE_GUID, 1 << 40, 4096),
+        );
+        let chain = collect_replay_chain(&region, &LIVE_GUID);
+        assert_eq!(chain.len(), 2);
+
+        let dev = MemDevice::filled(4 * 1024 * 1024, 0xCC);
+        assert!(apply_chain(&dev, &chain).is_err());
+        assert_eq!(
+            MemDevice::byte_at(&dev, 1024 * 1024),
+            0xCC,
+            "the first descriptor of a chain that was going to be refused \
+             was applied anyway"
+        );
     }
 }
