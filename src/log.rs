@@ -459,6 +459,30 @@ pub fn collect_replay_chain(log_bytes: &[u8], expected_log_guid: &[u8; 16]) -> V
 /// mid-replay leaves a partially-applied but recoverable state — the
 /// reader will pick up from the next valid sequence number on the next
 /// open.
+/// The largest VHDX block, and so the most one descriptor's allocation
+/// can have grown the file.
+const MAX_BLOCK_SIZE: u64 = 256 * 1024 * 1024;
+
+/// How far the file may reach once this chain has been applied.
+///
+/// The greater of what the file is now and what the chain says it
+/// became, with the latter bounded by one block per descriptor. See the
+/// note in [`apply_chain`].
+fn allowed_extent(current: u64, chain: &[LogEntry]) -> u64 {
+    let descriptors: u64 = chain
+        .iter()
+        .map(|entry| entry.descriptors.len() as u64)
+        .sum();
+    let ceiling = current.saturating_add(descriptors.saturating_mul(MAX_BLOCK_SIZE));
+    let claimed = chain
+        .iter()
+        .map(|entry| entry.header.last_file_offset)
+        .max()
+        .unwrap_or(0)
+        .min(ceiling);
+    current.max(claimed)
+}
+
 pub fn apply_chain(dev: &Arc<dyn BlockDevice>, chain: &[LogEntry]) -> Result<()> {
     // WHERE EACH DESCRIPTOR LANDS, BEFORE ANY OF THEM LAND.
     //
@@ -480,7 +504,23 @@ pub fn apply_chain(dev: &Arc<dyn BlockDevice>, chain: &[LogEntry]) -> Result<()>
     // leaves the device means the log is not describing this device,
     // and a partly-applied chain is precisely the damage: descriptors
     // one and two are as destructive as the one that got caught.
-    let dev_size = dev.size_bytes();
+    //
+    // BUT A LOG MAY LEGITIMATELY GROW THE FILE. That is what
+    // `last_file_offset` in the entry header is for: the highest byte
+    // the entry is aware of. After a crash mid-allocation the log
+    // describes BAT and metadata sectors past the current end, and the
+    // reference implementation applies every descriptor (writes past
+    // EOF extend the file) and then truncates up to that offset. A
+    // bound of the file's current size alone refuses that chain and
+    // with it the whole open -- the ordinary post-crash shape.
+    //
+    // How far it may grow is bounded by what a log entry can be about.
+    // Each descriptor is one sector or one zeroed span within a single
+    // allocation, and a VHDX block is at most `MAX_BLOCK_SIZE`, so a
+    // chain cannot have made the file grow by more than one block per
+    // descriptor. A `last_file_offset` beyond that is not describing
+    // this file.
+    let dev_size = allowed_extent(dev.size_bytes(), chain);
     for entry in chain {
         for d in &entry.descriptors {
             let (file_offset, length) = match d {
@@ -1013,6 +1053,70 @@ mod tests {
         assert_eq!(MemDevice::byte_at(&dev, 2 * 1024 * 1024), 0);
         assert_eq!(MemDevice::byte_at(&dev, 2 * 1024 * 1024 + 8191), 0);
         assert_eq!(MemDevice::byte_at(&dev, 2 * 1024 * 1024 + 8192), 0xCC);
+    }
+
+    /// A log may legitimately grow the file: `last_file_offset` is the
+    /// highest byte the entry is aware of, and after a crash
+    /// mid-allocation the log describes sectors past the current end.
+    /// The reference implementation applies every descriptor -- writes
+    /// past EOF extend the file -- and then truncates up to that
+    /// offset. Bounding by the file's current size alone refused that
+    /// chain, and with it the whole open.
+    ///
+    /// How far it may grow is bounded by what an entry can be about:
+    /// one allocation per descriptor, and a VHDX block is at most
+    /// 256 MiB.
+    #[test]
+    fn a_chain_may_grow_the_file_by_what_its_descriptors_could_have_allocated() {
+        const MIB: u64 = 1024 * 1024;
+        let entry = |last_file_offset: u64, descriptors: usize| LogEntry {
+            header: LogEntryHeader {
+                entry_length: LOG_SECTOR_SIZE as u32,
+                tail: 0,
+                sequence_number: 1,
+                descriptor_count: descriptors as u32,
+                log_guid: LIVE_GUID,
+                flushed_file_offset: 0,
+                last_file_offset,
+            },
+            descriptors: (0..descriptors)
+                .map(|i| Descriptor::Zero {
+                    zero_length: 4096,
+                    file_offset: i as u64 * 4096,
+                    sequence_number: 1,
+                })
+                .collect(),
+            log_offset_in_region: 0,
+        };
+
+        // A chain that says nothing about the file's size does not
+        // grow it.
+        assert_eq!(allowed_extent(64 * MIB, &[entry(0, 1)]), 64 * MIB);
+
+        // One that says the file became a sector longer is believed:
+        // this is the post-crash shape.
+        assert_eq!(
+            allowed_extent(64 * MIB, &[entry(64 * MIB + 4096, 1)]),
+            64 * MIB + 4096
+        );
+
+        // One descriptor cannot have allocated more than one block, so
+        // a claim past that is not describing this file.
+        let outrageous = entry(1 << 62, 1);
+        assert_eq!(
+            allowed_extent(64 * MIB, &[outrageous]),
+            64 * MIB + 256 * MIB
+        );
+
+        // Four descriptors, four blocks.
+        assert_eq!(
+            allowed_extent(64 * MIB, &[entry(1 << 62, 4)]),
+            64 * MIB + 4 * 256 * MIB
+        );
+
+        // A claim SHORTER than the file does not shrink the bound --
+        // the descriptors still have to land inside what is there.
+        assert_eq!(allowed_extent(64 * MIB, &[entry(4096, 1)]), 64 * MIB);
     }
 
     /// A descriptor names where on the device to write, and that
