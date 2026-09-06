@@ -409,6 +409,55 @@ pub fn collect_replay_chain(log_bytes: &[u8], expected_log_guid: &[u8; 16]) -> V
 /// reader will pick up from the next valid sequence number on the next
 /// open.
 pub fn apply_chain(dev: &Arc<dyn BlockDevice>, chain: &[LogEntry]) -> Result<()> {
+    // WHERE EACH DESCRIPTOR LANDS, BEFORE ANY OF THEM LAND.
+    //
+    // A descriptor says where on the device to write and how much, and
+    // both numbers came out of the image. Replay runs on `open` --
+    // including a read-only open, which takes the host file read-write
+    // when it can, because a dirty VHDX has to be replayed before its
+    // region table, metadata and BAT mean anything. So merely handing
+    // this reader a file is enough to ask it to write.
+    //
+    // Against a file-backed device a write past the end is not an
+    // error: the file grows. A "zero" descriptor starting at 0 and
+    // running for eight times the file's length erased the image and
+    // grew it to eight times its size, and `open` then reported "no
+    // valid VHDX region table found" -- so the caller was told the file
+    // was not a VHDX, and not that it had just been overwritten.
+    //
+    // The whole chain is checked before the first write. A span that
+    // leaves the device means the log is not describing this device,
+    // and a partly-applied chain is precisely the damage: descriptors
+    // one and two are as destructive as the one that got caught.
+    let dev_size = dev.size_bytes();
+    for entry in chain {
+        for d in &entry.descriptors {
+            let (file_offset, length) = match d {
+                Descriptor::Zero {
+                    zero_length,
+                    file_offset,
+                    ..
+                } => (*file_offset, *zero_length),
+                Descriptor::Data {
+                    file_offset,
+                    sector,
+                    ..
+                } => (*file_offset, sector.len() as u64),
+            };
+            let end = file_offset.checked_add(length).ok_or_else(|| {
+                Error::LogReplay(format!(
+                    "descriptor at {file_offset} spans {length} bytes, which overflows"
+                ))
+            })?;
+            if end > dev_size {
+                return Err(Error::LogReplay(format!(
+                    "descriptor writes {length} bytes at {file_offset}, ending at {end} \
+                     on a device of {dev_size} bytes"
+                )));
+            }
+        }
+    }
+
     for entry in chain {
         for d in &entry.descriptors {
             match d {
@@ -913,5 +962,113 @@ mod tests {
         assert_eq!(MemDevice::byte_at(&dev, 2 * 1024 * 1024), 0);
         assert_eq!(MemDevice::byte_at(&dev, 2 * 1024 * 1024 + 8191), 0);
         assert_eq!(MemDevice::byte_at(&dev, 2 * 1024 * 1024 + 8192), 0xCC);
+    }
+
+    /// A descriptor names where on the device to write, and that
+    /// number comes out of the image.
+    ///
+    /// Replay runs on `open`, including a read-only open -- the reader
+    /// takes the host file read-write when it can, because a dirty
+    /// VHDX has to be replayed before its BAT and metadata mean
+    /// anything. So a descriptor pointing off the end of the device is
+    /// a write somebody gets by handing over a file, and against a
+    /// file-backed device it is not even an error: the file grows.
+    ///
+    /// A span that leaves the device means the log is not describing
+    /// this device, so nothing in the chain is applied. Refusing the
+    /// whole chain rather than the one descriptor is the point -- a
+    /// partly-applied chain is the damage.
+    #[test]
+    fn a_zero_span_running_past_the_device_is_refused_before_anything_is_written() {
+        let mut region = vec![0u8; TEST_REGION_LEN];
+        // Starts inside the device and runs off the end of it.
+        splice(
+            &mut region,
+            0,
+            &zero_descriptor_entry(1, &LIVE_GUID, 2 * 1024 * 1024, u64::MAX),
+        );
+        let chain = collect_replay_chain(&region, &LIVE_GUID);
+        assert_eq!(chain.len(), 1, "the entry itself is well formed");
+
+        let dev = MemDevice::filled(4 * 1024 * 1024, 0xCC);
+        assert!(
+            apply_chain(&dev, &chain).is_err(),
+            "replay accepted a span of u64::MAX bytes on a 4 MiB device"
+        );
+        assert_eq!(
+            MemDevice::byte_at(&dev, 2 * 1024 * 1024),
+            0xCC,
+            "the refused span was written anyway, up to where the device ended"
+        );
+    }
+
+    #[test]
+    fn a_zero_span_starting_past_the_device_is_refused() {
+        let mut region = vec![0u8; TEST_REGION_LEN];
+        splice(
+            &mut region,
+            0,
+            &zero_descriptor_entry(1, &LIVE_GUID, 1 << 40, 4096),
+        );
+        let chain = collect_replay_chain(&region, &LIVE_GUID);
+        let dev = MemDevice::filled(4 * 1024 * 1024, 0xCC);
+        assert!(apply_chain(&dev, &chain).is_err());
+    }
+
+    #[test]
+    fn a_data_sector_past_the_device_is_refused() {
+        let mut sector = vec![0xABu8; LOG_SECTOR_SIZE];
+        sector[0..8].copy_from_slice(&0u64.to_le_bytes());
+        sector[LOG_SECTOR_SIZE - 4..].copy_from_slice(&0u32.to_le_bytes());
+        let entry = encode_entry(
+            1,
+            0,
+            &LIVE_GUID,
+            0,
+            0,
+            &[PendingWrite {
+                file_offset: 1 << 40,
+                sector,
+            }],
+        );
+        let mut region = vec![0u8; TEST_REGION_LEN];
+        splice(&mut region, 0, &entry);
+        let chain = collect_replay_chain(&region, &LIVE_GUID);
+        assert_eq!(chain.len(), 1, "the entry itself is well formed");
+
+        let dev = MemDevice::filled(4 * 1024 * 1024, 0xCC);
+        assert!(
+            apply_chain(&dev, &chain).is_err(),
+            "replay wrote a sector at byte 2^40 of a 4 MiB device"
+        );
+    }
+
+    /// The refusal has to come before the first write, not part way
+    /// through: a chain whose first descriptor is fine and whose second
+    /// is not must leave the device as it found it.
+    #[test]
+    fn a_chain_with_one_bad_descriptor_applies_none_of_it() {
+        let mut region = vec![0u8; TEST_REGION_LEN];
+        splice(
+            &mut region,
+            0,
+            &zero_descriptor_entry(1, &LIVE_GUID, 1024 * 1024, 4096),
+        );
+        splice(
+            &mut region,
+            LOG_SECTOR_SIZE,
+            &zero_descriptor_entry(2, &LIVE_GUID, 1 << 40, 4096),
+        );
+        let chain = collect_replay_chain(&region, &LIVE_GUID);
+        assert_eq!(chain.len(), 2);
+
+        let dev = MemDevice::filled(4 * 1024 * 1024, 0xCC);
+        assert!(apply_chain(&dev, &chain).is_err());
+        assert_eq!(
+            MemDevice::byte_at(&dev, 1024 * 1024),
+            0xCC,
+            "the first descriptor of a chain that was going to be refused \
+             was applied anyway"
+        );
     }
 }
