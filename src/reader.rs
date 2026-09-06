@@ -286,8 +286,8 @@ impl VhdxReader {
         if file_params.block_size < MIN_BLOCK_SIZE || file_params.block_size > MAX_BLOCK_SIZE {
             return Err(Error::Corrupt("block_size outside [1 MiB, 256 MiB]"));
         }
-        if !sector_size.is_power_of_two() {
-            return Err(Error::Corrupt("sector_size not a power of two"));
+        if !matches!(sector_size, 512 | 4096) {
+            return Err(Error::Corrupt("sector_size must be 512 or 4096"));
         }
 
         let chunk_ratio = compute_chunk_ratio(file_params.block_size, sector_size);

@@ -8,7 +8,7 @@
 
 mod common;
 
-use std::io::{Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 
 use common::*;
 use vhdx::{Error, VhdxReader};
@@ -35,6 +35,18 @@ fn patch(path: &std::path::Path, offset: u64, bytes: &[u8]) {
     f.seek(SeekFrom::Start(offset)).unwrap();
     f.write_all(bytes).unwrap();
     f.flush().unwrap();
+}
+
+fn patch_header_version(path: &std::path::Path, version: u16) {
+    let mut f = open_file_rw(path);
+    let mut header = vec![0u8; HEADER_SIZE];
+    f.seek(SeekFrom::Start(HEADER1_OFFSET)).unwrap();
+    f.read_exact(&mut header).unwrap();
+    header[66..68].copy_from_slice(&version.to_le_bytes());
+    let crc = vhdx::header::compute_crc(&header);
+    header[4..8].copy_from_slice(&crc.to_le_bytes());
+    drop(f);
+    patch(path, HEADER1_OFFSET, &header);
 }
 
 #[test]
@@ -142,5 +154,45 @@ fn bad_metadata_signature_is_rejected() {
         .err()
         .expect("expected BadMetadata, got Ok");
     assert!(matches!(err, Error::BadMetadata(_)), "got {err:?}");
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn unsupported_header_version_is_rejected_after_crc_recompute() {
+    let path = tmp_path("unsupported_header_version");
+    build_vhdx(&path, &ramp_block());
+    patch_header_version(&path, 2);
+
+    let err = VhdxReader::open(&path)
+        .err()
+        .expect("expected unsupported header version to be rejected");
+    assert!(matches!(err, Error::NoValidHeader), "got {err:?}");
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn unsupported_logical_sector_size_is_rejected() {
+    let path = tmp_path("unsupported_sector_size");
+    build_vhdx(&path, &ramp_block());
+    patch(&path, LOGICAL_SECTOR_SIZE_OFFSET, &1024u32.to_le_bytes());
+
+    let err = VhdxReader::open(&path)
+        .err()
+        .expect("expected unsupported sector size to be rejected");
+    assert!(matches!(
+        err,
+        Error::Corrupt("sector_size must be 512 or 4096")
+    ));
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn accepts_4096_logical_sector_size() {
+    let path = tmp_path("sector_size_4096");
+    build_vhdx(&path, &ramp_block());
+    patch(&path, LOGICAL_SECTOR_SIZE_OFFSET, &4096u32.to_le_bytes());
+
+    let reader = VhdxReader::open(&path).expect("4096-byte sectors are valid VHDX");
+    assert_eq!(reader.sector_size(), 4096);
     let _ = std::fs::remove_file(&path);
 }
