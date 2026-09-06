@@ -148,10 +148,15 @@ pub struct LogEntry {
 }
 
 /// Compute CRC-32C of an entry buffer with the checksum field zeroed.
+///
+/// In three pieces rather than over a zeroed copy: discovery checksums
+/// every candidate slot, and copying each one first meant an allocation
+/// the size of whatever length the slot declared -- up to the whole log
+/// region, for a slot that was about to be rejected.
 fn entry_crc(bytes: &[u8]) -> u32 {
-    let mut tmp = bytes.to_vec();
-    tmp[4..8].fill(0);
-    crc32c::crc32c(&tmp)
+    let crc = crc32c::crc32c(&bytes[0..4]);
+    let crc = crc32c::crc32c_append(crc, &[0u8; 4]);
+    crc32c::crc32c_append(crc, &bytes[8..])
 }
 
 /// Try to parse one log entry starting at `pos` inside `log_bytes`.
@@ -159,7 +164,12 @@ fn entry_crc(bytes: &[u8]) -> u32 {
 /// The error says *why* the slot was refused. `Empty` means keep
 /// looking; the other three mean something was written here that cannot
 /// be replayed, which the caller must not treat as an empty slot.
-fn parse_log_entry(log_bytes: &[u8], pos: usize, expected_log_guid: &[u8; 16]) -> ParseOutcome {
+fn parse_log_entry(
+    log_bytes: &[u8],
+    pos: usize,
+    expected_log_guid: &[u8; 16],
+    checksum_budget: &mut usize,
+) -> ParseOutcome {
     if pos + LOG_SECTOR_SIZE > log_bytes.len() {
         return Err(EntryReject::Empty);
     }
@@ -174,6 +184,34 @@ fn parse_log_entry(log_bytes: &[u8], pos: usize, expected_log_guid: &[u8; 16]) -
     {
         return Err(EntryReject::Corrupt);
     }
+    // The GUID sits inside the first sector, so a slot belonging to
+    // some other chain is rejected without checksumming the length it
+    // declared. The checksum is the expensive part of a probe and this
+    // is the one field that can rule a slot out before paying it.
+    let mut log_guid = [0u8; 16];
+    log_guid.copy_from_slice(&head[32..48]);
+    if &log_guid != expected_log_guid {
+        return Err(EntryReject::ForeignChain);
+    }
+
+    // A probe checksums as many bytes as the slot claims to be long,
+    // and a slot that claims to reach the end of the region costs the
+    // whole region. Discovery steps one sector after a refusal, so
+    // every sector of a region filled with such slots pays that in
+    // turn: the work is quadratic in the region's length. Measured
+    // before this budget existed: 4 MiB of log took 143 ms, 32 MiB took
+    // 12.6 s, and `log_length` is a u32, so 4 GiB would have taken
+    // days -- on the plain read-only open.
+    //
+    // The budget is what a well-formed region can honestly need. Its
+    // entries tile it without overlapping, so discovery checksums each
+    // byte about once; four times that leaves room for a region that is
+    // partly rewritten without leaving room for the quadratic case.
+    if *checksum_budget < entry_length {
+        return Err(EntryReject::Corrupt);
+    }
+    *checksum_budget -= entry_length;
+
     let entry_bytes = &log_bytes[pos..pos + entry_length];
     let stored_crc = read_u32_le(entry_bytes, 4);
     if stored_crc != entry_crc(entry_bytes) {
@@ -183,14 +221,8 @@ fn parse_log_entry(log_bytes: &[u8], pos: usize, expected_log_guid: &[u8; 16]) -
     let tail = read_u32_le(entry_bytes, 12);
     let sequence_number = read_u64_le(entry_bytes, 16);
     let descriptor_count = read_u32_le(entry_bytes, 24);
-    let mut log_guid = [0u8; 16];
-    log_guid.copy_from_slice(&entry_bytes[32..48]);
     let flushed_file_offset = read_u64_le(entry_bytes, 48);
     let last_file_offset = read_u64_le(entry_bytes, 56);
-
-    if &log_guid != expected_log_guid {
-        return Err(EntryReject::ForeignChain);
-    }
 
     // Descriptors live immediately after the 64-byte header.
     let Some(descriptors_size) = (descriptor_count as usize).checked_mul(LOG_DESCRIPTOR_SIZE)
@@ -310,20 +342,29 @@ fn entry_starting_at(found: &[LogEntry], offset: usize) -> Option<&LogEntry> {
 /// sentinel for "log is empty"), when the log region is missing, when
 /// the region holds no entry of this chain, or when the chain's own
 /// start cannot be located.
-pub fn collect_replay_chain(log_bytes: &[u8], expected_log_guid: &[u8; 16]) -> Vec<LogEntry> {
-    if expected_log_guid.iter().all(|b| *b == 0) {
-        return Vec::new();
-    }
+/// How many times over discovery may checksum the log region.
+///
+/// See the budget note in `parse_log_entry` for what this stops.
+pub const DISCOVERY_CHECKSUM_PASSES: usize = 4;
 
-    // Pass 1 — discovery. Probe every 4 KiB slot and never stop early.
-    // An entry can sit anywhere in the region: the log is a circular
-    // buffer, and this crate's own writer splices wherever it finds
-    // room without recording where. Discovery only establishes what is
-    // present; it decides nothing about what gets applied.
+/// Probe every slot in the region and return what is there, along with
+/// how many bytes were checksummed doing it.
+///
+/// Split out from [`collect_replay_chain`] so the budget is testable:
+/// the number returned is the work the budget bounds, and a test can
+/// assert on it rather than on how long the call took.
+fn discover(log_bytes: &[u8], expected_log_guid: &[u8; 16]) -> (Vec<LogEntry>, usize) {
+    // Probe every 4 KiB slot and never stop early. An entry can sit
+    // anywhere in the region: the log is a circular buffer, and this
+    // crate's own writer splices wherever it finds room without
+    // recording where. Discovery only establishes what is present; it
+    // decides nothing about what gets applied.
+    let allowance = log_bytes.len().saturating_mul(DISCOVERY_CHECKSUM_PASSES);
+    let mut budget = allowance;
     let mut found: Vec<LogEntry> = Vec::new();
     let mut pos = 0usize;
     while pos + LOG_SECTOR_SIZE <= log_bytes.len() {
-        match parse_log_entry(log_bytes, pos, expected_log_guid) {
+        match parse_log_entry(log_bytes, pos, expected_log_guid, &mut budget) {
             Ok(entry) => {
                 pos += entry.header.entry_length as usize;
                 found.push(entry);
@@ -334,6 +375,16 @@ pub fn collect_replay_chain(log_bytes: &[u8], expected_log_guid: &[u8; 16]) -> V
             Err(_) => pos += LOG_SECTOR_SIZE,
         }
     }
+    (found, allowance - budget)
+}
+
+pub fn collect_replay_chain(log_bytes: &[u8], expected_log_guid: &[u8; 16]) -> Vec<LogEntry> {
+    if expected_log_guid.iter().all(|b| *b == 0) {
+        return Vec::new();
+    }
+
+    // Pass 1 — discovery.
+    let (found, _checksummed) = discover(log_bytes, expected_log_guid);
     if found.is_empty() {
         return found;
     }
@@ -978,6 +1029,54 @@ mod tests {
     /// this device, so nothing in the chain is applied. Refusing the
     /// whole chain rather than the one descriptor is the point -- a
     /// partly-applied chain is the damage.
+    /// Discovery probes every slot, and a probe costs a checksum over
+    /// whatever length the slot declares. A region whose every sector
+    /// declares that it runs to the end of the region therefore costs
+    /// the region's length, once per sector -- quadratic work on the
+    /// read-only open path, where `log_length` is a u32 and so the
+    /// region can be 4 GiB.
+    ///
+    /// The assertion is on bytes checksummed rather than on elapsed
+    /// time, because that is what the budget actually bounds and it
+    /// does not depend on how loaded the machine is.
+    #[test]
+    fn a_region_of_overlapping_claims_is_checksummed_a_bounded_number_of_times() {
+        const REGION: usize = 4 * 1024 * 1024;
+        let mut region = vec![0u8; REGION];
+        // Every sector: a well-formed header claiming to reach the end
+        // of the region, carrying the live GUID, with a checksum that
+        // will not match.
+        for pos in (0..REGION).step_by(LOG_SECTOR_SIZE) {
+            let len = (REGION - pos) as u32;
+            region[pos..pos + 4].copy_from_slice(LOG_ENTRY_SIGNATURE);
+            region[pos + 8..pos + 12].copy_from_slice(&len.to_le_bytes());
+            region[pos + 32..pos + 48].copy_from_slice(&LIVE_GUID);
+        }
+
+        let (found, checksummed) = discover(&region, &LIVE_GUID);
+        assert!(found.is_empty(), "none of those slots is a valid entry");
+        assert!(
+            checksummed <= REGION * DISCOVERY_CHECKSUM_PASSES,
+            "discovery checksummed {checksummed} bytes of a {REGION}-byte region, \
+             which is {:.1} times over",
+            checksummed as f64 / REGION as f64
+        );
+    }
+
+    /// The budget must not cost a well-formed region its entries: a log
+    /// whose entries tile it is checksummed about once through.
+    #[test]
+    fn a_well_formed_region_stays_well_inside_the_budget() {
+        let region = contiguous_chain(4);
+        let (found, checksummed) = discover(&region, &LIVE_GUID);
+        assert_eq!(sequences(&found), vec![1, 2, 3, 4]);
+        assert!(
+            checksummed <= region.len(),
+            "a tiling region checksummed {checksummed} bytes of {}",
+            region.len()
+        );
+    }
+
     #[test]
     fn a_zero_span_running_past_the_device_is_refused_before_anything_is_written() {
         let mut region = vec![0u8; TEST_REGION_LEN];

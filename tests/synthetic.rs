@@ -527,3 +527,102 @@ fn a_read_only_open_does_not_let_the_log_erase_the_file() {
 
     let _ = std::fs::remove_file(&path);
 }
+
+/// The log, the metadata table and the BAT are each located by an
+/// offset and a `u32` length that came out of the image, and each is
+/// read whole into a buffer sized from that length alone. A file of a
+/// few kilobytes could ask for 4 GiB three times over.
+///
+/// The sibling VHD reader has always checked that its BAT fits inside
+/// the file it lives in. These are the same kind of number.
+#[test]
+fn a_region_claiming_more_than_the_file_is_refused() {
+    for (which, entry_offset) in [("BAT", 16u64), ("metadata", 16 + 32)] {
+        let path = tmp_path(&format!("oversized_{which}"));
+        let block0 = pattern_block(11);
+        build_big_vhdx(&path, &block0);
+
+        {
+            let mut f = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .unwrap();
+            let mut rt = vec![0u8; REGION_TABLE_SIZE];
+            {
+                use std::io::Read;
+                f.seek(SeekFrom::Start(REGION_TABLE1_OFFSET)).unwrap();
+                f.read_exact(&mut rt).unwrap();
+            }
+            let len_at = (entry_offset + 24) as usize;
+            rt[len_at..len_at + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+            let crc = {
+                let mut tmp = rt.clone();
+                tmp[4..8].fill(0);
+                crc32c::crc32c(&tmp)
+            };
+            rt[4..8].copy_from_slice(&crc.to_le_bytes());
+            for at in [REGION_TABLE1_OFFSET, REGION_TABLE2_OFFSET] {
+                f.seek(SeekFrom::Start(at)).unwrap();
+                f.write_all(&rt).unwrap();
+            }
+            f.flush().unwrap();
+        }
+
+        // The open fails either way -- reading 4 GiB out of a 64 MiB
+        // file comes up short. What is being asserted is that it is
+        // refused by name, before the buffer is allocated and the read
+        // is issued, rather than by the read running out of file.
+        let outcome = VhdxReader::open(&path);
+        let why = format!("{:?}", outcome.as_ref().err());
+        assert!(
+            why.contains("past the end of the file"),
+            "a {which} region of 4 GiB in a 64 MiB file was refused as {why}, \
+             which means the buffer was allocated and read first"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
+/// A BAT entry is one 64-bit word off the disk. `BatEntry::from_u64`
+/// keeps its top 44 bits as a megabyte count, so the largest host
+/// offset it can name is just under 2^64, and the reader added the
+/// offset within the block to it and read there.
+///
+/// Past the end of the file that produced a short read, which at least
+/// failed. Above `2^64 - block_size` it wrapped, and a wrapped offset
+/// does not fail: it reads somewhere else in the file and hands the
+/// caller those bytes as the guest's. (The wrap needs a block larger
+/// than 1 MiB to reach; the bound below is what stops both.)
+#[test]
+fn a_bat_entry_pointing_past_the_file_is_refused_by_name() {
+    let path = tmp_path("bat_past_file");
+    let block0 = pattern_block(12);
+    build_big_vhdx(&path, &block0);
+
+    {
+        let mut f = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        // FullyPresent (state 6) at the highest megabyte-aligned offset
+        // the encoding can express.
+        let entry: u64 = 0xFFFF_FFFF_FFF0_0000 | 6;
+        f.seek(SeekFrom::Start(BIG_BAT_OFFSET)).unwrap();
+        f.write_all(&entry.to_le_bytes()).unwrap();
+        f.flush().unwrap();
+    }
+
+    let r = VhdxReader::open(&path).unwrap();
+    let mut buf = vec![0u8; 4096];
+    let why = format!("{:?}", r.read_at(0, &mut buf).err());
+    assert!(
+        why.contains("past the file"),
+        "a BAT entry at offset 2^64 - 1 MiB was refused as {why}, which means \
+         the read was issued at that offset rather than refused"
+    );
+
+    drop(r);
+    let _ = std::fs::remove_file(&path);
+}
