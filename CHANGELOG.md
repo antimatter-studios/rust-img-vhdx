@@ -7,6 +7,19 @@ never does.
 
 ## [Unreleased]
 
+## [0.3.5] — 2026-09-06
+
+### Fixed
+
+- Opening a file read-only no longer replays its log and destroys it.
+  A VHDX carries a log of metadata writes, and replaying it is part of
+  opening the image — but a reader that was handed the file read-only
+  was replaying into it anyway, so simply looking at an image changed
+  it.
+- A log chain may legitimately grow the file, within what its
+  descriptors allocated. Refusing every chain that reached past the
+  current end of file refused images the reference tools write.
+
 ## [0.3.4] — 2026-09-04
 
 ### Fixed

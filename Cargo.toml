@@ -1,6 +1,6 @@
 [package]
 name = "am-img-vhdx"
-version = "0.3.4"
+version = "0.3.5"
 edition = "2021"
 license = "MIT"
 description = "Pure-Rust VHDX (Microsoft VHD's modern successor) reader. Used by Hyper-V and WSL2. Exposes a Rust API and a C ABI suitable for FFI from C/C++/Go/Swift."
