@@ -285,16 +285,43 @@ fn falls_back_to_header2_when_header1_version_is_unsupported() {
     let path = tmp_path("header2_fallback_unsupported_version");
     build_vhdx(&path, &ramp_block());
 
-    // A real VHDX has two redundant header copies. Keep header 2 valid so
-    // this test exercises fallback after header 1 is rejected for its
-    // unsupported version, rather than merely observing NoValidHeader.
-    patch(&path, HEADER2_OFFSET, &encode_header(2, [0u8; 16], 0, 0));
+    // Give header 2 a lower sequence number but an active log. This makes
+    // the selected slot observable: header 2 must be selected after header 1
+    // is rejected, otherwise the log replay below never happens.
+    let log_guid = [0x77u8; 16];
+    let log_offset = 4 * ONE_MIB;
+    let log_length = ONE_MIB as u32;
+    let entry = vhdx::log::encode_entry(
+        2,
+        0,
+        &log_guid,
+        8 * ONE_MIB,
+        8 * ONE_MIB,
+        &[vhdx::log::PendingWrite {
+            file_offset: DATA_BLOCK_OFFSET,
+            sector: vec![0xEE; 4096],
+        }],
+    );
+    {
+        let mut f = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        f.set_len(8 * ONE_MIB).unwrap();
+        f.seek(SeekFrom::Start(log_offset)).unwrap();
+        f.write_all(&entry).unwrap();
+        f.seek(SeekFrom::Start(HEADER2_OFFSET)).unwrap();
+        f.write_all(&encode_header(0, log_guid, log_length, log_offset))
+            .unwrap();
+        f.flush().unwrap();
+    }
     patch_header_version(&path, 2);
 
     let reader = VhdxReader::open(&path).expect("should recover via header 2");
-    let mut buf = [0u8; 4];
+    let mut buf = [0u8; 4096];
     reader.read_at(0, &mut buf).unwrap();
-    assert_eq!(buf, [0, 1, 2, 3]);
+    assert!(buf.iter().all(|byte| *byte == 0xEE));
     let _ = std::fs::remove_file(&path);
 }
 
