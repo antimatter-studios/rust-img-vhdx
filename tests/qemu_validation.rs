@@ -241,6 +241,99 @@ fn a_log_version_we_do_not_know_is_refused_like_qemu_refuses_it() {
     }
 }
 
+/// Add a region entry with `guid`, `required` as given, to **both**
+/// region-table copies of an image, repairing each table's CRC-32C.
+///
+/// Repairing the CRC is the whole point: the check under test is about a
+/// well-formed table that names a region the reader does not know, not
+/// about a damaged one.
+fn add_region_entry(path: &Path, guid: [u8; 16], required: bool) {
+    const TABLE_OFFSETS: [usize; 2] = [192 * 1024, 256 * 1024];
+    const TABLE_SIZE: usize = 64 * 1024;
+    let mut bytes = std::fs::read(path).unwrap();
+    for at in TABLE_OFFSETS {
+        assert_eq!(
+            &bytes[at..at + 4],
+            b"regi",
+            "table at {at} is not a region table"
+        );
+        let count = u32::from_le_bytes(bytes[at + 8..at + 12].try_into().unwrap()) as usize;
+        let off = at + 16 + count * 32;
+        bytes[off..off + 16].copy_from_slice(&guid);
+        // A zero-length region at the very end of the file: never read,
+        // and never meant to be — the question is whether its flag is
+        // honoured, not what is in it.
+        bytes[off + 16..off + 24].copy_from_slice(&0u64.to_le_bytes());
+        bytes[off + 24..off + 28].copy_from_slice(&0u32.to_le_bytes());
+        bytes[off + 28..off + 32].copy_from_slice(&(if required { 1u32 } else { 0 }).to_le_bytes());
+        bytes[at + 8..at + 12].copy_from_slice(&((count + 1) as u32).to_le_bytes());
+        bytes[at + 4..at + 8].fill(0);
+        let crc = vhdx::region_table::compute_crc(&bytes[at..at + TABLE_SIZE]);
+        bytes[at + 4..at + 8].copy_from_slice(&crc.to_le_bytes());
+    }
+    std::fs::write(path, &bytes).unwrap();
+}
+
+/// A region's `Required` flag is a hard gate. A region whose GUID the
+/// implementation does not recognise, with the flag set, means the file
+/// must not be loaded — it is how the format reserves room for a region
+/// that *transforms* the payload, an encryption region or a dedup map,
+/// without older readers quietly returning the untransformed bytes.
+///
+/// The flag was parsed onto `RegionEntry` and read by nothing outside
+/// the module's own tests, so such an image was read as though the
+/// region were not there: BAT found, metadata found, payload blocks
+/// returned raw, and no error, because nothing looked.
+///
+/// qemu refuses such a file. The test asserts both halves — that it
+/// refuses, and that we do — so it cannot pass by the patch failing to
+/// take effect.
+#[test]
+fn an_unknown_required_region_is_refused_like_qemu_refuses_it() {
+    let p = tmp_path("required-region");
+    qemu_create(&p, "8M");
+    VhdxReader::open(&p).expect("the unpatched image must open");
+
+    add_region_entry(&p, [0xDEu8; 16], true);
+
+    let refusal = run_qemu(&["info", p.to_str().unwrap()]);
+    assert!(
+        !refusal.status.success(),
+        "precondition: qemu must refuse an unknown required region"
+    );
+    match VhdxReader::open(&p) {
+        Err(vhdx::Error::Unsupported(msg)) => assert!(
+            msg.contains("region"),
+            "the refusal must name the region, got {msg:?}"
+        ),
+        Err(other) => panic!("expected Unsupported, got {other:?}"),
+        Ok(_) => panic!(
+            "opened a file qemu refuses: {}",
+            String::from_utf8_lossy(&refusal.stderr).trim()
+        ),
+    }
+}
+
+/// The same region with the flag *clear* is the format saying "ignore
+/// me if you do not know me", and the image must still open and read.
+/// This is what makes the check a gate rather than a blanket refusal of
+/// unknown regions.
+#[test]
+fn an_unknown_optional_region_is_ignored() {
+    let raw = raw_path("optional-region");
+    let p = tmp_path("optional-region");
+    let data = pattern(1024 * 1024);
+    std::fs::write(&raw, &data).unwrap();
+    qemu_convert_raw_to_vhdx(&raw, &p);
+
+    add_region_entry(&p, [0xDEu8; 16], false);
+
+    let r = VhdxReader::open(&p).expect("an unknown optional region must be ignored");
+    let mut buf = vec![0u8; 4096];
+    r.read_at(0, &mut buf).unwrap();
+    assert_eq!(buf, data[..4096]);
+}
+
 /// Direction 1 (cross-read, trivial): a blank qemu VHDX reads as all
 /// zeros through our reader, and we report the geometry qemu encoded.
 /// Misparsing the header/metadata would corrupt the BAT walk and

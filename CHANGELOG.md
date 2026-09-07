@@ -9,6 +9,17 @@ never does.
 
 ### Fixed
 
+- **A region marked Required whose GUID we do not know is refused.** The
+  flag was parsed onto `RegionEntry` and read by nothing outside the
+  module's own tests, so an image carrying such a region was read as
+  though it were not there: BAT found, metadata found, payload blocks
+  returned raw, and no error, because nothing looked. The flag exists so
+  a file that transforms its payload — an encryption region, a dedup map
+  — is not read raw by an implementation that has never heard of the
+  transform. `qemu-img` refuses such a file; the two now agree. An
+  unknown region with the flag *clear* is still ignored, as the format
+  asks.
+
 - **A log format we cannot parse is refused instead of replayed.** The
   header's `log_version` was read into `_` and discarded, so an image
   declaring any log format at all was handed to the version-0 parser and
