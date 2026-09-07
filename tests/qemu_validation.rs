@@ -158,6 +158,28 @@ fn pattern(len: usize) -> Vec<u8> {
     (0..len).map(|i| (i % 251) as u8).collect()
 }
 
+const HEADER_SLOTS: [u64; 2] = [64 * 1024, 128 * 1024];
+const HEADER_SIZE: usize = 4096;
+const LOG_VERSION_OFFSET: usize = 64;
+
+/// Overwrite a two-byte field in **both** header slots and repair each
+/// slot's CRC-32C, so the image fails for the reason the test is about
+/// rather than for a checksum. Repairing the CRC is the whole point: the
+/// header checksum covers this field, so a valid-CRC image carrying an
+/// unknown value is exactly the shape a future revision of the format
+/// would have.
+fn patch_both_headers_u16(path: &Path, field_offset: usize, value: u16) {
+    let mut bytes = std::fs::read(path).unwrap();
+    for slot in HEADER_SLOTS {
+        let at = slot as usize;
+        assert_eq!(&bytes[at..at + 4], b"head", "slot {slot} is not a header");
+        bytes[at + field_offset..at + field_offset + 2].copy_from_slice(&value.to_le_bytes());
+        let crc = vhdx::header::compute_crc(&bytes[at..at + HEADER_SIZE]);
+        bytes[at + 4..at + 8].copy_from_slice(&crc.to_le_bytes());
+    }
+    std::fs::write(path, &bytes).unwrap();
+}
+
 /// Sanity: qemu-img is reachable. If this fails every other test here
 /// would fail uselessly, so it gives the clearest diagnostic.
 #[test]
@@ -176,6 +198,47 @@ fn qemu_check_passes_on_empty_qemu_image() {
     let p = tmp_path("empty");
     qemu_create(&p, "4M");
     qemu_check(&p);
+}
+
+/// `log_version` is the format's forward-compatibility latch: version 0
+/// is the only log format defined, and a reader that meets another value
+/// is required to stop rather than guess.
+///
+/// The consequence of guessing is a **write**. `open` replays the log
+/// before anything else, so descriptors decoded by the version-0 parser
+/// out of a log written in some other format get their payloads written
+/// into the file's data zones, on top of real data.
+///
+/// qemu is the arbiter here: it refuses such a file outright, and the
+/// test asserts that both implementations agree.
+#[test]
+fn a_log_version_we_do_not_know_is_refused_like_qemu_refuses_it() {
+    let p = tmp_path("log-version");
+    qemu_create(&p, "8M");
+
+    // Baseline: qemu wrote log_version 0 and both of us accept it.
+    qemu_check(&p);
+    VhdxReader::open(&p).expect("the unpatched qemu image must open");
+
+    patch_both_headers_u16(&p, LOG_VERSION_OFFSET, 1);
+
+    let refusal = run_qemu(&["info", p.to_str().unwrap()]);
+    assert!(
+        !refusal.status.success(),
+        "precondition: qemu must refuse log_version 1, but it accepted the file"
+    );
+
+    match VhdxReader::open(&p) {
+        Err(vhdx::Error::Unsupported(msg)) => assert!(
+            msg.contains("log version"),
+            "the refusal must name the log version, got {msg:?}"
+        ),
+        Err(other) => panic!("expected Unsupported, got {other:?}"),
+        Ok(_) => panic!(
+            "opened a file qemu refuses: {}",
+            String::from_utf8_lossy(&refusal.stderr).trim()
+        ),
+    }
 }
 
 /// Direction 1 (cross-read, trivial): a blank qemu VHDX reads as all

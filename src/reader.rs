@@ -33,7 +33,7 @@
 
 use crate::bat::{chunk_ratio as compute_chunk_ratio, data_bat_index, BatEntry, PayloadState};
 use crate::error::{Error, Result};
-use crate::header::{Header, HEADER1_OFFSET, HEADER2_OFFSET, HEADER_SIZE};
+use crate::header::{Header, HEADER1_OFFSET, HEADER2_OFFSET, HEADER_SIZE, LOG_VERSION_V0};
 use crate::log::{apply_chain, collect_replay_chain, encode_entry, PendingWrite, LOG_SECTOR_SIZE};
 use crate::metadata::{
     item_ids, read_sector_size, read_virtual_disk_size, FileParameters, MetadataTable,
@@ -214,6 +214,24 @@ impl VhdxReader {
         // 2. Header — try both slots, pick the one with the higher
         //    sequence_number that passes CRC.
         let (header, active_slot) = pick_header(&dev, dev_size)?;
+
+        // 2a. The log format the header declares.
+        //
+        // Refused here, unconditionally, rather than beside the replay
+        // below: a log version this crate does not understand means the
+        // log *region* is not one it can reason about at all, and a
+        // later write would append to it. Gating the check on the log
+        // being dirty would leave that door open.
+        //
+        // This is the field's whole purpose. The header CRC covers it,
+        // so a file with a good checksum and an unknown log version is
+        // exactly the shape a future revision of the format has — the
+        // one case where the reader must stop instead of guessing.
+        if header.log_version != LOG_VERSION_V0 {
+            return Err(Error::Unsupported(
+                "log version other than 0 (this crate parses only the v0 log format)",
+            ));
+        }
 
         // 3. Log replay (before we read region/metadata/BAT — those
         //    bytes might be stale). Only attempted when log_offset and
@@ -959,7 +977,13 @@ pub fn encode_header(h: &Header) -> Vec<u8> {
     buf[16..32].copy_from_slice(&h.file_write_guid);
     buf[32..48].copy_from_slice(&h.data_write_guid);
     buf[48..64].copy_from_slice(&h.log_guid);
-    buf[64..66].copy_from_slice(&0u16.to_le_bytes()); // log_version
+    // The file's own declared log version, not a constant: a rewrite
+    // must not quietly reset the format a file says it is in. The value
+    // can only ever be LOG_VERSION_V0 here, because `open_inner` refuses
+    // anything else before a `Header` reaches this function -- but
+    // encoding what we parsed is what keeps that true if the refusal
+    // ever moves.
+    buf[64..66].copy_from_slice(&h.log_version.to_le_bytes());
     buf[66..68].copy_from_slice(&h.version.to_le_bytes());
     buf[68..72].copy_from_slice(&h.log_length.to_le_bytes());
     buf[72..80].copy_from_slice(&h.log_offset.to_le_bytes());
@@ -1022,6 +1046,34 @@ fn fs_core_to_vhdx_error(e: fs_core::Error) -> Error {
 #[cfg(test)]
 mod shared_helper_tests {
     use super::*;
+
+    /// `encode_header` used to write a literal `0` for `log_version`,
+    /// so any image this crate rewrote — which every replay does, via
+    /// `rewrite_header_clear_log` — had its declared log format silently
+    /// reset. A rewrite must not change what format a file says it is
+    /// in, and the round trip is what pins that.
+    #[test]
+    fn encoding_a_header_preserves_the_log_version_it_carries() {
+        let mut h = Header {
+            sequence_number: 9,
+            file_write_guid: [0xAA; 16],
+            data_write_guid: [0xBB; 16],
+            log_guid: [0xCC; 16],
+            log_version: LOG_VERSION_V0,
+            version: 1,
+            log_length: 1 << 20,
+            log_offset: 4 << 20,
+        };
+        let round_tripped = Header::parse(&encode_header(&h)).unwrap();
+        assert_eq!(round_tripped.log_version, LOG_VERSION_V0);
+        assert_eq!(round_tripped.version, 1);
+
+        // A value this crate refuses to open still has to survive an
+        // encode unchanged: silently rewriting it to 0 would turn a file
+        // we could not read into one we would read wrongly.
+        h.log_version = 7;
+        assert_eq!(Header::parse(&encode_header(&h)).unwrap().log_version, 7);
+    }
 
     /// The sequence number lands on bytes 8..16, and nowhere else.
     ///
