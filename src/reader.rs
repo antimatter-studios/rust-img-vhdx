@@ -121,6 +121,14 @@ impl HeaderSlot {
 }
 
 /// Smallest payload block size the VHDX specification permits.
+/// The alignment and granularity the format gives every region,
+/// including the log.
+///
+/// The first megabyte of a VHDX is the header section — the file
+/// identifier, both headers and both region tables — so no region may
+/// begin inside it.
+const ONE_MIB: u64 = 1024 * 1024;
+
 const MIN_BLOCK_SIZE: u32 = 1024 * 1024;
 
 /// Largest payload block size the VHDX specification permits.
@@ -174,6 +182,85 @@ fn span_inside_the_file(
         return Err(Error::Corrupt(outside));
     }
     Ok(length as usize)
+}
+
+/// The log region has to be somewhere a region may go, before anything
+/// is done with it.
+///
+/// `log_offset` and `log_length` were checked only inside the branch
+/// that runs when the log is dirty, so on a clean image — `log_guid` all
+/// zeros, which is what every image a writer closed properly looks like
+/// — nothing ever read them, and the write path then used them raw.
+/// `journal_sector_write` zeroes `log_length` bytes at `log_offset`
+/// before splicing its entry in, so the first write to such an image
+/// erases whatever those two fields name.
+///
+/// Measured on the four-block fixture with `log_offset` moved onto the
+/// metadata region and `log_guid` left at zero, then one 4 KiB write:
+///
+/// ```text
+/// metadata before: [6d, 65, 74, 61, 64, 61, 74, 61, ...]   "metadata"
+/// write_at -> Ok(())
+/// metadata after:  [6c, 6f, 67, 65, 88, ee, ce, c8, ...]   "loge"
+/// reopen -> BadMetadata("signature mismatch")
+/// ```
+///
+/// The reference tool refuses such a file at open, by name:
+/// `VHDX region 2097152-3145728 overlaps with region 2097152-3145728`.
+fn validate_log_region(dev_size: u64, header: &Header) -> Result<()> {
+    // A log region of zero length is the format's way of saying there
+    // is no log. `journal_sector_write` already declines to journal in
+    // that case, so nothing is erased and there is nothing to bound.
+    if header.log_length == 0 {
+        return Ok(());
+    }
+    let len = u64::from(header.log_length);
+    if !header.log_offset.is_multiple_of(ONE_MIB) || !len.is_multiple_of(ONE_MIB) {
+        return Err(Error::Corrupt(
+            "log region is not aligned to, or a whole number of, megabytes",
+        ));
+    }
+    // The first megabyte holds the file identifier, both headers and
+    // both region tables. Nothing else may live there.
+    if header.log_offset < ONE_MIB {
+        return Err(Error::Corrupt(
+            "log region starts inside the file's header section",
+        ));
+    }
+    span_inside_the_file(
+        dev_size,
+        header.log_offset,
+        len,
+        "log region reaches past the end of the file",
+    )?;
+    Ok(())
+}
+
+/// The log region must not sit on top of a region the file declares.
+///
+/// Separate from [`validate_log_region`] because it needs the region
+/// table, which is read after the log is replayed — the module doc at
+/// the top of this file explains why that order is not negotiable. The
+/// erase that would do the damage is deferred until after this runs.
+fn log_region_clear_of_declared_regions(
+    regions: &crate::region_table::RegionTable,
+    header: &Header,
+) -> Result<()> {
+    if header.log_length == 0 {
+        return Ok(());
+    }
+    let log_start = header.log_offset;
+    let log_end = log_start.saturating_add(u64::from(header.log_length));
+    for entry in &regions.entries {
+        let start = entry.file_offset;
+        let end = start.saturating_add(u64::from(entry.length));
+        if log_start < end && start < log_end {
+            return Err(Error::Corrupt(
+                "log region overlaps a region the file declares",
+            ));
+        }
+    }
+    Ok(())
 }
 
 impl VhdxReader {
@@ -249,9 +336,24 @@ impl VhdxReader {
             ));
         }
 
+        // 2b. Where the log region is, checked before anything uses it
+        //     — including the write path, which erases it.
+        //
+        //     Unconditional, and above the `log_guid` test on purpose:
+        //     a clean image is exactly the one whose log fields nothing
+        //     looked at, and the first write to it is what turns a bad
+        //     pair of numbers into a destroyed file.
+        validate_log_region(dev_size, &header)?;
+
         // 3. Log replay (before we read region/metadata/BAT — those
         //    bytes might be stale). Only attempted when log_offset and
         //    log_length are non-zero AND the log_guid is non-zero.
+        //
+        //    The chain is applied here; marking it consumed is deferred
+        //    to step 4c, because doing so erases the log region and this
+        //    is above the point where the region table can say whether
+        //    that region is somewhere it may be erased.
+        let mut replayed = false;
         if !is_zero_guid(&header.log_guid) && header.log_length > 0 && header.log_offset > 0 {
             let mut log_bytes = vec![
                 0u8;
@@ -287,12 +389,7 @@ impl VhdxReader {
                     return Err(Error::LogNeedsReplay);
                 }
                 apply_chain(&dev, &chain)?;
-                // Mark the log as replayed by zeroing the active log
-                // chain region and bumping the header.log_guid to a
-                // fresh value. Per spec we move the active header to
-                // the other slot with a new sequence_number.
-                zero_log_region(&dev, header.log_offset, header.log_length)?;
-                rewrite_header_clear_log(&dev, &header, active_slot)?;
+                replayed = true;
             }
         }
 
@@ -310,6 +407,26 @@ impl VhdxReader {
                 "a region marked Required whose GUID this crate does not recognise — \
                  the file may transform its payload in a way reading it raw would ignore",
             ));
+        }
+
+        // 4b. The log region against the regions the file declares.
+        //     This is the half `validate_log_region` cannot do, because
+        //     it needs the table that step 4 has only just read.
+        log_region_clear_of_declared_regions(&region_table, &header)?;
+
+        // 4c. Now that the log region is known to be somewhere it may be
+        //     erased, mark a replayed chain as consumed: zero the region
+        //     and bump the header into the other slot with `log_guid`
+        //     cleared, per the spec.
+        //
+        //     Deferred from step 3 deliberately. Erasing there meant a
+        //     file whose `log_offset` named the metadata region had that
+        //     region zeroed by the very act of opening it read-write,
+        //     which is the worst version of the defect: the reader
+        //     destroys the image while reporting that it repaired it.
+        if replayed {
+            zero_log_region(&dev, header.log_offset, header.log_length)?;
+            rewrite_header_clear_log(&dev, &header, active_slot)?;
         }
 
         // 5. Metadata.
