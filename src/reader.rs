@@ -316,7 +316,7 @@ impl VhdxReader {
 
         // 2. Header — try both slots, pick the one with the higher
         //    sequence_number that passes CRC.
-        let (header, active_slot) = pick_header(&dev, dev_size)?;
+        let (mut header, mut active_slot) = pick_header(&dev, dev_size)?;
 
         // 2a. The log format the header declares.
         //
@@ -426,7 +426,13 @@ impl VhdxReader {
         //     destroys the image while reporting that it repaired it.
         if replayed {
             zero_log_region(&dev, header.log_offset, header.log_length)?;
-            rewrite_header_clear_log(&dev, &header, active_slot)?;
+            // Take back what was written. The rewrite lands in the other
+            // slot with a higher sequence number, so the reader built
+            // below has to be built from *that*, or its first journalled
+            // write rotates onto the only current header and leaves the
+            // stale one -- which still advertises the chain just erased
+            // -- as the fallback a torn write would fall back to.
+            (header, active_slot) = rewrite_header_clear_log(&dev, &header, active_slot)?;
         }
 
         // 5. Metadata.
@@ -1116,7 +1122,7 @@ fn rewrite_header_clear_log(
     dev: &Arc<dyn BlockDevice>,
     header: &Header,
     active_slot: HeaderSlot,
-) -> Result<()> {
+) -> Result<(Header, HeaderSlot)> {
     let mut new_header = header.clone();
     new_header.sequence_number = header.sequence_number.wrapping_add(1);
     new_header.log_guid = [0u8; 16];
@@ -1128,7 +1134,12 @@ fn rewrite_header_clear_log(
     dev.write_at(other.offset(), &bytes)
         .map_err(fs_core_to_vhdx_error)?;
     dev.flush().map_err(fs_core_to_vhdx_error)?;
-    Ok(())
+    // Handed back rather than dropped: after this returns, the file's
+    // current header is this one, in this slot. A caller that kept the
+    // pair it passed in is holding the older of the two, and every
+    // rotation it does from there is off by one slot and one sequence
+    // number.
+    Ok((new_header, other))
 }
 
 /// Encode a `Header` into the 4 KiB on-disk representation with a
