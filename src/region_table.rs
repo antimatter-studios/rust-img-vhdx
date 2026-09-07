@@ -105,6 +105,25 @@ impl RegionTable {
     pub fn find(&self, target: &[u8; 16]) -> Option<&RegionEntry> {
         self.entries.iter().find(|e| &e.guid == target)
     }
+
+    /// The first entry this reader does not recognise that the file
+    /// says it must, or `None`.
+    ///
+    /// The `Required` flag is a hard gate rather than a hint. It is how
+    /// the format reserves room for a region that *transforms* the
+    /// payload — an encryption region, a dedup map — without an older
+    /// reader quietly handing back the untransformed bytes: a reader
+    /// that does not know the GUID cannot know what the transform was,
+    /// so the only correct answer is to stop.
+    ///
+    /// An unknown entry with the flag *clear* is the format saying
+    /// "ignore me if you do not know me", and is ignored. That is what
+    /// makes this a gate rather than a refusal of every unknown region.
+    pub fn unknown_required(&self) -> Option<&RegionEntry> {
+        self.entries
+            .iter()
+            .find(|e| e.required && e.guid != guids::BAT && e.guid != guids::METADATA)
+    }
 }
 
 /// CRC-32C of the region-table header with the checksum field zeroed.

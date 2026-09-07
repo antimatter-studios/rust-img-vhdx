@@ -28,6 +28,17 @@
 //! file, which is not the same as work waiting to be done — an image
 //! with a stale GUID and an empty chain opens read-only like any other.
 //!
+//! ## Regions this reader does not know
+//!
+//! The region table can name regions beyond the BAT and the metadata
+//! table, and each entry carries a `Required` flag. The flag is a hard
+//! gate rather than a hint: it is how the format reserves room for a
+//! region that *transforms* the payload — an encryption region, a dedup
+//! map — without an older reader quietly handing back the untransformed
+//! bytes. An unknown region with the flag set is `Unsupported`; with it
+//! clear it is ignored, which is what the format asks for and what keeps
+//! a vendor region that is none of our business from refusing the image.
+//!
 //! ## Limitations
 //!
 //! - No differencing-chain resolution (parent VHDX). Surfaced as
@@ -287,6 +298,19 @@ impl VhdxReader {
 
         // 4. Region table.
         let region_table = pick_region_table(&dev, dev_size)?;
+
+        // 4a. A region this reader does not know, that the file says it
+        //     must. See `RegionTable::unknown_required`: the flag exists
+        //     so that a file carrying a payload transform is not read
+        //     raw by an implementation that has never heard of it, and
+        //     reading it raw is exactly what ignoring the flag did.
+        //     `qemu-img` refuses such a file outright.
+        if region_table.unknown_required().is_some() {
+            return Err(Error::Unsupported(
+                "a region marked Required whose GUID this crate does not recognise — \
+                 the file may transform its payload in a way reading it raw would ignore",
+            ));
+        }
 
         // 5. Metadata.
         let metadata_entry = region_table

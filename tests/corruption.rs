@@ -207,3 +207,69 @@ fn bad_metadata_signature_is_rejected() {
     assert!(matches!(err, Error::BadMetadata(_)), "got {err:?}");
     let _ = std::fs::remove_file(&path);
 }
+
+/// A region entry's `Required` flag is a hard gate: a region whose GUID
+/// this reader does not know, with the flag set, means the file must not
+/// be loaded. It is how the format reserves room for a region that
+/// *transforms* the payload — an encryption region, a dedup map —
+/// without an older reader quietly handing back the untransformed bytes.
+///
+/// The flag was parsed onto `RegionEntry` and read by nothing outside
+/// the module's own tests, so such an image was read as though the
+/// region were not there: BAT found, metadata found, payload returned
+/// raw, and no error, because nothing looked.
+#[test]
+fn an_unknown_required_region_is_unsupported() {
+    let path = tmp_path("required_region");
+    build_vhdx(&path, &ramp_block());
+    VhdxReader::open(&path).expect("fixture precondition");
+
+    append_region_entry(&path, REGION_TABLE1_OFFSET, [0xDE; 16], true);
+
+    match VhdxReader::open(&path) {
+        Err(Error::Unsupported(msg)) => assert!(
+            msg.contains("region"),
+            "the refusal must name the region, got {msg:?}"
+        ),
+        Err(other) => panic!("expected Unsupported, got {other:?}"),
+        Ok(_) => panic!("opened an image carrying a region we cannot honour"),
+    }
+    let _ = std::fs::remove_file(&path);
+}
+
+/// The same region with the flag clear is the format saying "ignore me
+/// if you do not know me". Honouring that is what makes the check a gate
+/// rather than a blanket refusal of every unknown region — and a blanket
+/// refusal would reject vendor regions that are none of our business.
+#[test]
+fn an_unknown_optional_region_is_ignored() {
+    let path = tmp_path("optional_region");
+    build_vhdx(&path, &ramp_block());
+    append_region_entry(&path, REGION_TABLE1_OFFSET, [0xDE; 16], false);
+
+    let r = VhdxReader::open(&path).expect("an unknown optional region must be ignored");
+    let mut buf = [0u8; 16];
+    r.read_at(0, &mut buf).unwrap();
+    assert_eq!(buf[1], 1);
+    drop(r);
+    let _ = std::fs::remove_file(&path);
+}
+
+/// Add a region entry to the table at `table_offset` and repair its
+/// CRC-32C, so the image fails for the reason the test is about rather
+/// than for a checksum.
+fn append_region_entry(path: &std::path::Path, table_offset: u64, guid: [u8; 16], required: bool) {
+    let mut image = std::fs::read(path).unwrap();
+    let at = table_offset as usize;
+    let count = u32::from_le_bytes(image[at + 8..at + 12].try_into().unwrap()) as usize;
+    let off = at + 16 + count * 32;
+    image[off..off + 16].copy_from_slice(&guid);
+    image[off + 16..off + 24].copy_from_slice(&0u64.to_le_bytes());
+    image[off + 24..off + 28].copy_from_slice(&0u32.to_le_bytes());
+    image[off + 28..off + 32].copy_from_slice(&u32::from(required).to_le_bytes());
+    image[at + 8..at + 12].copy_from_slice(&((count + 1) as u32).to_le_bytes());
+    image[at + 4..at + 8].fill(0);
+    let crc = vhdx::region_table::compute_crc(&image[at..at + REGION_TABLE_SIZE]);
+    image[at + 4..at + 8].copy_from_slice(&crc.to_le_bytes());
+    std::fs::write(path, &image).unwrap();
+}
