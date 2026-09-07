@@ -837,3 +837,92 @@ fn a_replay_that_moves_a_region_onto_the_log_is_refused_after_it_runs() {
     );
     let _ = std::fs::remove_file(&path);
 }
+
+// ---------------------------------------------------------------------------
+// The BAT region against the disk it describes
+// ---------------------------------------------------------------------------
+
+/// Rewrite both region-table copies with a BAT region of `bat_len`
+/// bytes, leaving everything else as the fixture built it.
+fn declare_bat_region_length(path: &std::path::Path, bat_len: u32) {
+    let table = encode_region_table(BIG_BAT_OFFSET, bat_len, BIG_METADATA_OFFSET);
+    let mut f = open_file_rw(path);
+    for off in [REGION_TABLE1_OFFSET, REGION_TABLE2_OFFSET] {
+        f.seek(SeekFrom::Start(off)).unwrap();
+        f.write_all(&table).unwrap();
+    }
+    f.flush().unwrap();
+}
+
+/// A BAT region too short for the disk is refused at open, naming the
+/// region.
+///
+/// The region table declares a length and the metadata declares a
+/// virtual size; the two are independent statements about the same
+/// table and nothing compared them. The shortfall surfaced on a read
+/// instead, as "BAT index out of range", the first time a caller
+/// touched a block past the end of the table — blaming the entry rather
+/// than the declaration, and only for a caller that reached that far.
+///
+/// The fixture's disk needs four entries and this declares two, so
+/// blocks 0 and 1 still read correctly: an image can be half-addressable
+/// and look healthy from the front, which is why the check belongs at
+/// open.
+#[test]
+fn a_bat_region_too_short_for_the_disk_is_refused_at_open() {
+    let path = tmp_path("bat_region_short");
+    build_big_vhdx(&path, &pattern_block(3));
+    declare_bat_region_length(&path, 2 * 8);
+
+    match VhdxReader::open(&path) {
+        Err(Error::Corrupt(m)) => assert!(
+            m.contains("BAT region is too short"),
+            "refused, but not for the region's length: {m}"
+        ),
+        Ok(_) => panic!("a BAT region half the size the disk needs was accepted"),
+        Err(e) => panic!("a short BAT region gave {e:?}"),
+    }
+}
+
+/// Exactly enough is enough.
+///
+/// The bound needs both ends: a check written one entry too strict
+/// refuses this image, and one too lax accepts the one above. The
+/// fixture's four blocks need four entries — `chunk_ratio` is large
+/// enough here that no sector-bitmap entry falls inside the range, so
+/// the required count is the block count.
+#[test]
+fn a_bat_region_of_exactly_the_required_length_is_accepted() {
+    let path = tmp_path("bat_region_exact");
+    build_big_vhdx(&path, &pattern_block(3));
+    declare_bat_region_length(&path, (BIG_BAT_ENTRIES * 8) as u32);
+
+    let r = VhdxReader::open(&path).expect("the region holds exactly what the disk needs");
+    let mut buf = [0u8; 16];
+    r.read_at(0, &mut buf).unwrap();
+    assert_eq!(buf[0], 0, "block 0 did not read back");
+}
+
+/// A length that is not a whole number of entries is refused rather
+/// than rounded down.
+///
+/// `chunks_exact(8)` drops a trailing partial entry silently, so a
+/// region declaring four entries and four spare bytes loaded as four
+/// entries and nobody looked at the remainder. Nobody writes that on
+/// purpose, which is the point: it is a declaration that disagrees with
+/// itself, and hearing about it is worth more than tolerating it.
+#[test]
+fn a_bat_region_length_that_is_not_whole_entries_is_refused() {
+    let path = tmp_path("bat_region_ragged");
+    build_big_vhdx(&path, &pattern_block(3));
+    declare_bat_region_length(&path, (BIG_BAT_ENTRIES * 8) as u32 + 4);
+
+    match VhdxReader::open(&path) {
+        Err(Error::Corrupt(m)) => assert!(
+            m.contains("whole number of 8-byte entries"),
+            "refused, but not for the ragged length: {m}"
+        ),
+        Ok(_) => panic!("a BAT region length of 8n+4 was accepted"),
+        Err(e) => panic!("a ragged BAT region gave {e:?}"),
+    }
+}

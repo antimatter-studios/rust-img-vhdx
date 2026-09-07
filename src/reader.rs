@@ -88,9 +88,13 @@ pub struct VhdxReader {
     chunk_ratio: u64,
 
     /// Where the BAT region lives on disk.
+    ///
+    /// Its *length* is not kept beside it. The length's one job is to
+    /// be checked against the geometry at open — see
+    /// [`bat_region_covers_the_disk`] — and once the BAT has been read
+    /// the in-memory table's own length is what every later question
+    /// is about. Storing it was what left it annotated as dead.
     bat_region_off: u64,
-    #[allow(dead_code)]
-    bat_region_len: u32,
 
     /// In-memory BAT — cached at open. Mutex-wrapped so writers can
     /// publish allocations atomically.
@@ -517,6 +521,10 @@ impl VhdxReader {
         let bat_region = region_table
             .find(&guids::BAT)
             .ok_or(Error::Corrupt("BAT region missing"))?;
+        // Inside the file first, then big enough. A region declaring
+        // `u32::MAX` bytes is past the end of every real file, and
+        // saying so is more use than telling its author that
+        // 4,294,967,295 is not a multiple of eight.
         let mut bat_bytes = vec![
             0u8;
             span_inside_the_file(
@@ -526,6 +534,12 @@ impl VhdxReader {
                 "BAT region reaches past the end of the file",
             )?
         ];
+        bat_region_covers_the_disk(
+            bat_region.length,
+            virtual_size,
+            file_params.block_size,
+            chunk_ratio,
+        )?;
         dev.read_at(bat_region.file_offset, &mut bat_bytes)
             .map_err(fs_core_to_vhdx_error)?;
         let mut bat = Vec::with_capacity(bat_bytes.len() / 8);
@@ -544,7 +558,6 @@ impl VhdxReader {
             sector_size,
             chunk_ratio,
             bat_region_off: bat_region.file_offset,
-            bat_region_len: bat_region.length,
             bat: Mutex::new(bat),
             has_parent: file_params.has_parent(),
             writable,
@@ -1173,6 +1186,69 @@ fn rewrite_header_clear_log(
     Ok((new_header, other))
 }
 
+/// The BAT region has to be big enough for the disk it describes.
+///
+/// The region table declares a length and the metadata declares a
+/// virtual size, and the two are independent statements about the same
+/// table. Nothing compared them: the BAT was loaded from whatever
+/// length the region declared, and a region too short for the disk was
+/// accepted.
+///
+/// The shortfall then surfaced on a *read*, as "BAT index out of
+/// range", the first time a caller touched a block past the end of the
+/// table. Three things wrong with that, none of them wrong bytes:
+///
+/// * the error blames the BAT entry, when the inconsistency is in the
+///   region declaration;
+/// * it is per-read, so a caller that only touches the low blocks — a
+///   partition probe reading the first sectors, say — gets a clean open
+///   and clean reads from an image whose upper half cannot be addressed
+///   at all;
+/// * on the write path it arrives after `transfer_end` has already said
+///   the offset is in range, which reads as the reader contradicting
+///   itself.
+///
+/// Everything needed to check it is known by the time the BAT is read.
+/// The last payload block is `ceil(virtual_size / block_size) - 1`, and
+/// `data_bat_index` maps that to the highest index a read can ask for;
+/// the region must hold one more entry than that index.
+///
+/// A length that is not a whole number of entries is refused rather
+/// than rounded. `chunks_exact(8)` silently drops a trailing partial
+/// entry, so a region declaring 8N+4 bytes loaded as N entries and the
+/// four bytes went unexamined — a declaration nobody wrote on purpose,
+/// and the kind of near-miss that is worth hearing about.
+fn bat_region_covers_the_disk(
+    region_len: u32,
+    virtual_size: u64,
+    block_size: u32,
+    chunk_ratio: u64,
+) -> Result<()> {
+    if !u64::from(region_len).is_multiple_of(BAT_ENTRY_SIZE) {
+        return Err(Error::Corrupt(
+            "the BAT region's length is not a whole number of 8-byte entries",
+        ));
+    }
+    if virtual_size == 0 {
+        return Ok(());
+    }
+    let last_block = virtual_size.div_ceil(u64::from(block_size)) - 1;
+    let highest_index = crate::bat::data_bat_index(last_block, chunk_ratio);
+    let required_entries = highest_index.checked_add(1).ok_or(Error::Corrupt(
+        "the disk needs more BAT entries than a u64 counts",
+    ))?;
+    let have_entries = u64::from(region_len) / BAT_ENTRY_SIZE;
+    if have_entries < required_entries {
+        return Err(Error::Corrupt(
+            "the BAT region is too short for the disk it describes",
+        ));
+    }
+    Ok(())
+}
+
+/// Bytes per BAT entry.
+const BAT_ENTRY_SIZE: u64 = 8;
+
 /// Encode a `Header` into the 4 KiB on-disk representation with a
 /// fresh CRC-32C in the checksum field.
 pub fn encode_header(h: &Header) -> Vec<u8> {
@@ -1257,6 +1333,63 @@ fn fs_core_to_vhdx_error(e: fs_core::Error) -> Error {
 #[cfg(test)]
 mod shared_helper_tests {
     use super::*;
+
+    /// The required entry count counts the sector-bitmap entries the
+    /// BAT interleaves, not just the payload blocks.
+    ///
+    /// Every `chunk_ratio` payload entries are followed by one
+    /// sector-bitmap entry, so a disk spanning several chunks needs
+    /// more entries than it has blocks. Deriving the count from the
+    /// block number alone under-counts by one entry per chunk boundary
+    /// crossed, and the region that is short by exactly that much is
+    /// then accepted.
+    ///
+    /// It is checked here rather than through an image because
+    /// crossing a chunk boundary takes 4,097 blocks — over 4 GiB at the
+    /// smallest legal block size — and a fixture that large would not
+    /// be built. `chunk_ratio` is a parameter of the function, so the
+    /// arithmetic can be asked the question directly.
+    #[test]
+    fn the_required_bat_length_counts_the_interleaved_bitmap_entries() {
+        const BLOCK: u32 = 1 << 20;
+        const RATIO: u64 = 4;
+
+        // Nine blocks at a chunk ratio of four: blocks 0..3 in chunk 0,
+        // 4..7 in chunk 1, block 8 in chunk 2, with a bitmap entry
+        // after each full chunk. `data_bat_index(8, 4)` is 10, so
+        // eleven entries.
+        let virtual_size = 9 * u64::from(BLOCK);
+        assert_eq!(crate::bat::data_bat_index(8, RATIO), 10);
+
+        bat_region_covers_the_disk(11 * 8, virtual_size, BLOCK, RATIO)
+            .expect("eleven entries is what this disk needs");
+        match bat_region_covers_the_disk(10 * 8, virtual_size, BLOCK, RATIO) {
+            Err(Error::Corrupt(m)) => assert!(
+                m.contains("too short"),
+                "refused, but not for its length: {m}"
+            ),
+            other => panic!("ten entries for a disk needing eleven gave {other:?}"),
+        }
+
+        // And the count a reader ignoring the interleave would compute
+        // — nine, one per block — is refused, which is the mistake this
+        // test exists for.
+        assert!(
+            bat_region_covers_the_disk(9 * 8, virtual_size, BLOCK, RATIO).is_err(),
+            "a region sized by block count alone was accepted"
+        );
+    }
+
+    /// A disk of no size needs no entries.
+    ///
+    /// `virtual_size / block_size - 1` underflows at zero, and the
+    /// subtraction is unguarded arithmetic on a value that comes off
+    /// the image. A zero-sized disk is refused elsewhere, so this is
+    /// about the function being total rather than about the image.
+    #[test]
+    fn a_zero_length_disk_needs_no_bat_entries() {
+        bat_region_covers_the_disk(0, 0, 1 << 20, 4).expect("nothing to cover");
+    }
 
     /// `encode_header` used to write a literal `0` for `log_version`,
     /// so any image this crate rewrote — which every replay does, via
