@@ -45,6 +45,20 @@ fn fully_present_block_round_trips() {
     let _ = std::fs::remove_file(&path);
 }
 
+/// A read running off the end is refused as `OutOfBounds`, and the
+/// error says how far past the end it went.
+///
+/// The `matches!` that used to stand here was a statement, so its
+/// `bool` was discarded and nothing was asserted: the test passed on
+/// the `unwrap_err()` above it, which only says the read failed
+/// somehow. That matters more here than in the sibling crates, because
+/// `transfer_end` has a second refusal immediately after the bounds
+/// check -- a differencing image leaves the same function as
+/// `Unsupported` -- and the two were indistinguishable to this test.
+///
+/// The three fields are asserted rather than just the variant, because
+/// `size` is the reader's answer to "how big is this image" and a
+/// caller sizing a buffer from a short read acts on it.
 #[test]
 fn out_of_bounds_read_errors() {
     let path = tmp_path("oob");
@@ -53,8 +67,21 @@ fn out_of_bounds_read_errors() {
 
     let r = VhdxReader::open(&path).unwrap();
     let mut buf = [0u8; 16];
-    let err = r.read_at(VIRTUAL_DISK_SIZE - 8, &mut buf).unwrap_err();
-    matches!(err, vhdx::Error::OutOfBounds { .. });
+    match r.read_at(VIRTUAL_DISK_SIZE - 8, &mut buf) {
+        Err(vhdx::Error::OutOfBounds { offset, len, size }) => {
+            assert_eq!(
+                offset,
+                VIRTUAL_DISK_SIZE - 8,
+                "the refusal names the wrong offset"
+            );
+            assert_eq!(len, 16, "the refusal names the wrong length");
+            assert_eq!(
+                size, VIRTUAL_DISK_SIZE,
+                "the refusal names the wrong image size"
+            );
+        }
+        other => panic!("a read eight bytes short of the end gave {other:?}"),
+    }
     let _ = std::fs::remove_file(&path);
 }
 
