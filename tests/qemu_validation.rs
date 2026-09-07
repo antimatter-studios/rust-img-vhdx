@@ -161,6 +161,7 @@ fn pattern(len: usize) -> Vec<u8> {
 const HEADER_SLOTS: [u64; 2] = [64 * 1024, 128 * 1024];
 const HEADER_SIZE: usize = 4096;
 const LOG_VERSION_OFFSET: usize = 64;
+const LOG_OFFSET_OFFSET: usize = 72;
 
 /// Overwrite a two-byte field in **both** header slots and repair each
 /// slot's CRC-32C, so the image fails for the reason the test is about
@@ -461,4 +462,96 @@ fn qemu_extracts_bytes_we_wrote() {
         out[..4096].iter().all(|&b| b == 0),
         "bytes before the write offset should be zero"
     );
+}
+
+/// Overwrite the eight-byte `log_offset` in **both** header slots and
+/// repair each slot's CRC-32C, for the same reason
+/// [`patch_both_headers_u16`] does: the check under test is about a
+/// well-formed header carrying a value it should not, not a damaged one.
+fn patch_both_headers_log_offset(path: &Path, value: u64) {
+    let mut bytes = std::fs::read(path).unwrap();
+    for slot in HEADER_SLOTS {
+        let at = slot as usize;
+        assert_eq!(&bytes[at..at + 4], b"head", "slot {slot} is not a header");
+        bytes[at + LOG_OFFSET_OFFSET..at + LOG_OFFSET_OFFSET + 8]
+            .copy_from_slice(&value.to_le_bytes());
+        let crc = vhdx::header::compute_crc(&bytes[at..at + HEADER_SIZE]);
+        bytes[at + 4..at + 8].copy_from_slice(&crc.to_le_bytes());
+    }
+    std::fs::write(path, &bytes).unwrap();
+}
+
+/// The file offset and length of the BAT region, read out of a real
+/// image's own region table.
+fn bat_region_of(path: &Path) -> (u64, u32) {
+    const TABLE_OFFSET: usize = 192 * 1024;
+    const BAT_GUID: [u8; 16] = [
+        0x66, 0x77, 0xC2, 0x2D, 0x23, 0xF6, 0x00, 0x42, 0x9D, 0x64, 0x11, 0x5E, 0x9B, 0xFD, 0x4A,
+        0x08,
+    ];
+    let bytes = std::fs::read(path).unwrap();
+    let count = u32::from_le_bytes(
+        bytes[TABLE_OFFSET + 8..TABLE_OFFSET + 12]
+            .try_into()
+            .unwrap(),
+    ) as usize;
+    for i in 0..count {
+        let off = TABLE_OFFSET + 16 + i * 32;
+        if bytes[off..off + 16] == BAT_GUID {
+            return (
+                u64::from_le_bytes(bytes[off + 16..off + 24].try_into().unwrap()),
+                u32::from_le_bytes(bytes[off + 24..off + 28].try_into().unwrap()),
+            );
+        }
+    }
+    panic!("no BAT region in {}", path.display());
+}
+
+/// A log region that lands on another region is refused, and the
+/// reference tool refuses it by name.
+///
+/// `log_offset` and `log_length` were validated only inside the branch
+/// that runs when the log is dirty, so a clean image — which is what
+/// every properly-closed image is — never had them looked at, and
+/// `journal_sector_write` then zeroed `log_length` bytes at `log_offset`
+/// before splicing its entry in. One 4 KiB write to such a file erased
+/// whatever the two fields named. Measured on our own fixture with the
+/// log pointed at the metadata region:
+///
+/// ```text
+/// metadata before: [6d, 65, 74, 61, 64, 61, 74, 61]   "metadata"
+/// write_at -> Ok(())
+/// metadata after:  [6c, 6f, 67, 65, 88, ee, ce, c8]   "loge"
+/// reopen -> BadMetadata("signature mismatch")
+/// ```
+///
+/// qemu is the arbiter, and this asserts both halves so the test cannot
+/// pass by the patch failing to take effect.
+#[test]
+fn a_log_region_on_top_of_another_region_is_refused_like_qemu_refuses_it() {
+    let p = tmp_path("log-over-region");
+    qemu_create(&p, "8M");
+    qemu_check(&p);
+    VhdxReader::open(&p).expect("the unpatched qemu image must open");
+
+    let (bat_offset, _) = bat_region_of(&p);
+    patch_both_headers_log_offset(&p, bat_offset);
+
+    let refusal = run_qemu(&["info", p.to_str().unwrap()]);
+    assert!(
+        !refusal.status.success(),
+        "precondition: qemu must refuse a log region over the BAT, but it accepted the file"
+    );
+
+    match VhdxReader::open_rw(&p) {
+        Err(vhdx::Error::Corrupt(msg)) => assert!(
+            msg.contains("log region"),
+            "the refusal must name the log region, got {msg:?}"
+        ),
+        Err(other) => panic!("expected Corrupt, got {other:?}"),
+        Ok(_) => panic!(
+            "opened a file qemu refuses: {}",
+            String::from_utf8_lossy(&refusal.stderr).trim()
+        ),
+    }
 }

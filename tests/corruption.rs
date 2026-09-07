@@ -351,3 +351,262 @@ fn accepts_4096_logical_sector_size() {
     assert_eq!(reader.sector_size(), 4096);
     let _ = std::fs::remove_file(&path);
 }
+
+// ---------------------------------------------------------------------------
+// The log region has to be somewhere a region may go
+//
+// `log_offset` and `log_length` were checked only inside the branch that
+// runs when the log is dirty. A clean image — `log_guid` all zeros,
+// which is what every properly-closed image looks like — never had them
+// read at all, and `journal_sector_write` then zeroed `log_length` bytes
+// at `log_offset` before splicing its entry in. So the first write to
+// such an image erased whatever those two fields named.
+// ---------------------------------------------------------------------------
+
+/// Build the four-block fixture with `log_offset` and `log_length`
+/// replaced, leaving `log_guid` at zero so the image looks clean.
+fn big_vhdx_with_log_region(name: &str, log_offset: u64, log_length: u32) -> std::path::PathBuf {
+    let path = tmp_path(name);
+    let block = pattern_block(3);
+    build_big_vhdx(&path, &block);
+    let mut f = open_file_rw(&path);
+    f.write_all_at(
+        &encode_header(1, [0u8; 16], log_length, log_offset),
+        HEADER1_OFFSET,
+    )
+    .unwrap();
+    path
+}
+
+#[test]
+fn a_log_region_over_the_metadata_region_is_refused_at_open() {
+    let path = big_vhdx_with_log_region("log_over_meta", BIG_METADATA_OFFSET, BIG_LOG_LENGTH);
+
+    let before = std::fs::read(&path).unwrap();
+    let err = VhdxReader::open_rw(&path)
+        .err()
+        .expect("a log region on top of the metadata region must be refused");
+    assert!(matches!(err, Error::Corrupt(_)), "got {err:?}");
+
+    // And nothing was written on the way to the refusal. Before this,
+    // opening read-write and writing one 4 KiB sector turned the
+    // metadata table's "metadata" signature into "loge" and the next
+    // open into BadMetadata("signature mismatch").
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        before,
+        "the refusal must not have touched the file"
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn a_log_region_over_the_bat_region_is_refused_at_open() {
+    let path = big_vhdx_with_log_region("log_over_bat", BIG_BAT_OFFSET, BIG_LOG_LENGTH);
+    let err = VhdxReader::open_rw(&path)
+        .err()
+        .expect("a log region on top of the BAT must be refused");
+    assert!(matches!(err, Error::Corrupt(_)), "got {err:?}");
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn a_log_region_inside_the_header_section_is_refused_at_open() {
+    // The first megabyte holds the file identifier, both headers and
+    // both region tables. A log there would erase the reader's own way
+    // back in.
+    let path = big_vhdx_with_log_region("log_in_headers", 0, BIG_LOG_LENGTH);
+    let err = VhdxReader::open(&path)
+        .err()
+        .expect("a log region inside the header section must be refused");
+    assert!(matches!(err, Error::Corrupt(_)), "got {err:?}");
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn a_log_region_that_is_not_megabyte_aligned_is_refused_at_open() {
+    // 10 MiB + 4 KiB, in a 64 MiB file whose declared regions are at 5
+    // and 6 MiB. The offset overlaps nothing and is inside the file, so
+    // the alignment rule is the only thing that can refuse it — a
+    // test whose subject is caught by a neighbouring check proves
+    // nothing about its own.
+    let path = big_vhdx_with_log_region("log_unaligned", 10 * ONE_MIB + 4096, BIG_LOG_LENGTH);
+    let err = VhdxReader::open(&path)
+        .err()
+        .expect("a log region off the megabyte grid must be refused");
+    assert!(matches!(err, Error::Corrupt(_)), "got {err:?}");
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn a_log_region_whose_length_is_not_a_whole_megabyte_is_refused_at_open() {
+    // Same reasoning: aligned start, no overlap, inside the file. Only
+    // the length rule can refuse this.
+    let path = big_vhdx_with_log_region("log_len_unaligned", 10 * ONE_MIB, BIG_LOG_LENGTH + 4096);
+    let err = VhdxReader::open(&path)
+        .err()
+        .expect("a log length that is not a whole number of megabytes must be refused");
+    assert!(matches!(err, Error::Corrupt(_)), "got {err:?}");
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn a_sound_log_region_somewhere_else_in_the_file_still_opens() {
+    // The positive control for the two above: the same 10 MiB address,
+    // aligned and a whole megabyte long, is legal.
+    let path = big_vhdx_with_log_region("log_elsewhere", 10 * ONE_MIB, BIG_LOG_LENGTH);
+    VhdxReader::open(&path).expect("an aligned log region that overlaps nothing is legal");
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn a_log_region_reaching_past_the_end_of_the_file_is_refused_at_open() {
+    let path = big_vhdx_with_log_region("log_past_end", BIG_TOTAL_FILE_SIZE, BIG_LOG_LENGTH);
+    let err = VhdxReader::open(&path)
+        .err()
+        .expect("a log region past the end of the file must be refused");
+    assert!(matches!(err, Error::Corrupt(_)), "got {err:?}");
+    let _ = std::fs::remove_file(&path);
+}
+
+/// The positive control: the fixture's own log region is legal, and an
+/// image that declares no log at all is legal too.
+///
+/// Without these, a check that simply refused every image would pass
+/// every test above.
+#[test]
+fn a_sound_log_region_still_opens_and_writes() {
+    let path = big_vhdx_with_log_region("log_sound", BIG_LOG_OFFSET, BIG_LOG_LENGTH);
+    {
+        let r = VhdxReader::open_rw(&path).expect("the fixture's own log region is legal");
+        r.write_at(BIG_BLOCK_SIZE as u64, &[0xABu8; 4096])
+            .expect("and a write into an unallocated block still allocates");
+        r.flush().unwrap();
+    }
+    let r = VhdxReader::open(&path).expect("and the image is still readable afterwards");
+    let mut buf = vec![0u8; 4096];
+    r.read_at(BIG_BLOCK_SIZE as u64, &mut buf).unwrap();
+    assert_eq!(buf, vec![0xABu8; 4096]);
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn an_image_declaring_no_log_at_all_still_opens() {
+    let path = big_vhdx_with_log_region("log_absent", 0, 0);
+    VhdxReader::open(&path).expect("log_length = 0 means there is no log, which is legal");
+    let _ = std::fs::remove_file(&path);
+}
+
+/// A *dirty* image whose log region names a declared region is refused
+/// with that region intact.
+///
+/// This is the half the deferred erase exists for. `zero_log_region` used
+/// to run inside the replay branch, above the point where the region
+/// table can say whether the log region is somewhere it may be erased —
+/// so opening such a file read-write zeroed the region as part of
+/// "repairing" it, and the reader destroyed the image while reporting
+/// that it had fixed one.
+#[test]
+fn a_dirty_log_over_the_metadata_region_is_refused_with_the_region_intact() {
+    let path = tmp_path("dirty_log_over_meta");
+    let block = pattern_block(3);
+    build_big_vhdx(&path, &block);
+    {
+        let mut f = open_file_rw(&path);
+        // A non-zero log_guid says a writer left something pending.
+        f.write_all_at(
+            &encode_header(1, [0x11u8; 16], BIG_LOG_LENGTH, BIG_METADATA_OFFSET),
+            HEADER1_OFFSET,
+        )
+        .unwrap();
+    }
+    let before = std::fs::read(&path).unwrap();
+
+    let err = VhdxReader::open_rw(&path)
+        .err()
+        .expect("a dirty log on top of the metadata region must be refused");
+    assert!(matches!(err, Error::Corrupt(_)), "got {err:?}");
+
+    let after = std::fs::read(&path).unwrap();
+    let meta = BIG_METADATA_OFFSET as usize;
+    assert_eq!(
+        &after[meta..meta + 16],
+        &before[meta..meta + 16],
+        "the metadata region must be untouched"
+    );
+    assert_eq!(after, before, "nothing at all should have been written");
+    let _ = std::fs::remove_file(&path);
+}
+
+/// The erase is deferred until the region table has said the log region
+/// may be erased — and this is the fixture that proves the deferral,
+/// rather than the refusal that happens to come first.
+///
+/// `a_dirty_log_over_the_metadata_region_is_refused_with_the_region_intact`
+/// above passes on the overlap check alone: `collect_replay_chain` finds
+/// nothing in the metadata region's bytes, so `replayed` stays false and
+/// step 4c never runs. The deferral only bites when a chain really is
+/// replayed AND the region overlaps, which is the issue's own worst
+/// case — a write plants a real log entry over the metadata table, and
+/// the next open replays it and zeroes the rest of the region.
+///
+/// So this one forges a genuine single-entry chain at the hostile
+/// offset, and asserts on a marker 512 KiB into the log region: far past
+/// the 8 KiB the entry occupies, and inside the megabyte
+/// `zero_log_region` would erase. The entry cannot touch it and the
+/// erase cannot miss it.
+#[test]
+fn a_replayable_chain_at_a_hostile_log_offset_does_not_erase_the_region() {
+    let path = tmp_path("replayable_hostile_log");
+    let block0 = pattern_block(4);
+    build_big_vhdx(&path, &block0);
+
+    const MARKER_AT: u64 = BIG_METADATA_OFFSET + 512 * 1024;
+    let log_guid = [0x77u8; 16];
+    let entry = vhdx::log::encode_entry(
+        2,
+        0,
+        &log_guid,
+        BIG_TOTAL_FILE_SIZE,
+        BIG_TOTAL_FILE_SIZE,
+        &[vhdx::log::PendingWrite {
+            file_offset: BIG_DATA_BLOCK0_OFFSET + 8192,
+            sector: vec![0xEEu8; 4096],
+        }],
+    );
+
+    {
+        let mut f = open_file_rw(&path);
+        // The log region is declared over the metadata region, and the
+        // chain really is there.
+        f.write_all_at(&entry, BIG_METADATA_OFFSET).unwrap();
+        f.write_all_at(&[0xC5u8; 4096], MARKER_AT).unwrap();
+        // Header 2 wins on sequence number and declares the hostile log.
+        let mut hdr = encode_header(5, log_guid, BIG_LOG_LENGTH, BIG_METADATA_OFFSET);
+        hdr.truncate(HEADER_SIZE);
+        f.write_all_at(&hdr, HEADER2_OFFSET).unwrap();
+    }
+
+    // Precondition: the chain is genuinely replayable, so `replayed`
+    // becomes true and step 4c is reached. Without this the test would
+    // pass on the overlap check the way its neighbour does.
+    let before = std::fs::read(&path).unwrap();
+    assert_eq!(
+        &before[BIG_METADATA_OFFSET as usize..BIG_METADATA_OFFSET as usize + 4],
+        b"loge",
+        "the fixture must actually contain a log entry"
+    );
+
+    let err = VhdxReader::open_rw(&path)
+        .err()
+        .expect("a log region over a declared region must be refused");
+    assert!(matches!(err, Error::Corrupt(_)), "got {err:?}");
+
+    let after = std::fs::read(&path).unwrap();
+    assert_eq!(
+        &after[MARKER_AT as usize..MARKER_AT as usize + 16],
+        &[0xC5u8; 16],
+        "the log region was erased before anything said it could be"
+    );
+    let _ = std::fs::remove_file(&path);
+}
