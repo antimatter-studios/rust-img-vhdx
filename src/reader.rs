@@ -345,14 +345,39 @@ impl VhdxReader {
         //     pair of numbers into a destroyed file.
         validate_log_region(dev_size, &header)?;
 
-        // 3. Log replay (before we read region/metadata/BAT — those
-        //    bytes might be stale). Only attempted when log_offset and
-        //    log_length are non-zero AND the log_guid is non-zero.
+        // 2c. The region table, read before anything is replayed, so
+        //     that the log region can be checked against the regions
+        //     the file declares BEFORE a single descriptor is applied.
+        //
+        //     This is the ordering the reference tool uses, and the
+        //     reason to adopt it is that replay writes. A forged
+        //     single-entry chain whose one descriptor names
+        //     `file_offset = 0` with a zero length covering the whole
+        //     file passes `allowed_extent` — that bound is at least the
+        //     file's current size — so it erases the image, and the
+        //     open then fails with "log region overlaps a region the
+        //     file declares". The caller is told the file was bad
+        //     rather than that it has just been destroyed.
+        //
+        //     The module's ordering note says replay must precede the
+        //     region-table *read* because the log may be what fixes
+        //     those bytes. That argument survives: the table is read
+        //     again at step 4 and that later read is the authoritative
+        //     one. This read is used for one thing only — deciding
+        //     whether the log region is somewhere a replay may touch —
+        //     and a table that cannot be parsed at all means that
+        //     question cannot be answered, so the open stops rather
+        //     than writing on the strength of a file it cannot read.
+        let regions_before_replay = pick_region_table(&dev, dev_size)?;
+        log_region_clear_of_declared_regions(&regions_before_replay, &header)?;
+
+        // 3. Log replay. Only attempted when log_offset and log_length
+        //    are non-zero AND the log_guid is non-zero.
         //
         //    The chain is applied here; marking it consumed is deferred
-        //    to step 4c, because doing so erases the log region and this
-        //    is above the point where the region table can say whether
-        //    that region is somewhere it may be erased.
+        //    to step 4c, because doing so erases the log region and the
+        //    header rewrite that goes with it belongs after the table
+        //    has been read for real.
         let mut replayed = false;
         if !is_zero_guid(&header.log_guid) && header.log_length > 0 && header.log_offset > 0 {
             let mut log_bytes = vec![
@@ -409,9 +434,15 @@ impl VhdxReader {
             ));
         }
 
-        // 4b. The log region against the regions the file declares.
-        //     This is the half `validate_log_region` cannot do, because
-        //     it needs the table that step 4 has only just read.
+        // 4b. The log region against the regions the file declares,
+        //     asked again of the table as it stands after replay.
+        //
+        //     Step 2c asked the same question of the table as it stood
+        //     before, which is what keeps a replay from writing into a
+        //     region the file has declared. This second call is not a
+        //     duplicate of it: a replayed chain may have rewritten the
+        //     region table itself, and it is the post-replay table that
+        //     governs the erase in 4c.
         log_region_clear_of_declared_regions(&region_table, &header)?;
 
         // 4c. Now that the log region is known to be somewhere it may be
