@@ -27,6 +27,7 @@ pub const REGION_TABLE2_OFFSET: u64 = 256 * 1024;
 pub const METADATA_REGION_OFFSET: u64 = ONE_MIB;
 pub const BAT_REGION_OFFSET: u64 = 2 * ONE_MIB;
 pub const DATA_BLOCK_OFFSET: u64 = 3 * ONE_MIB;
+pub const LOGICAL_SECTOR_SIZE_OFFSET: u64 = METADATA_REGION_OFFSET + 144;
 
 pub const BAT_REGION_LEN: u32 = 8; // one entry
 pub const BLOCK_SIZE: u32 = ONE_MIB as u32;

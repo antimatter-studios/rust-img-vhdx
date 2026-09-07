@@ -54,6 +54,12 @@ fn patch_header_field(path: &std::path::Path, slot: u64, field_offset: usize, by
     std::fs::write(path, &image).unwrap();
 }
 
+/// The header's `version` field, at offset 66, patched in the first
+/// header slot with that slot's CRC repaired.
+fn patch_header_version(path: &std::path::Path, version: u16) {
+    patch_header_field(path, HEADER1_OFFSET, 66, &version.to_le_bytes());
+}
+
 #[test]
 fn valid_image_opens_as_baseline() {
     // Guards the corruption tests below: if this fails the fixture is
@@ -272,4 +278,76 @@ fn append_region_entry(path: &std::path::Path, table_offset: u64, guid: [u8; 16]
     let crc = vhdx::region_table::compute_crc(&image[at..at + REGION_TABLE_SIZE]);
     image[at + 4..at + 8].copy_from_slice(&crc.to_le_bytes());
     std::fs::write(path, &image).unwrap();
+}
+
+#[test]
+fn falls_back_to_header2_when_header1_version_is_unsupported() {
+    let path = tmp_path("header2_fallback_unsupported_version");
+    build_vhdx(&path, &ramp_block());
+
+    // Give header 2 a lower sequence number but an active log. This makes
+    // the selected slot observable: header 2 must be selected after header 1
+    // is rejected, otherwise the log replay below never happens.
+    let log_guid = [0x77u8; 16];
+    let log_offset = 4 * ONE_MIB;
+    let log_length = ONE_MIB as u32;
+    let entry = vhdx::log::encode_entry(
+        2,
+        0,
+        &log_guid,
+        8 * ONE_MIB,
+        8 * ONE_MIB,
+        &[vhdx::log::PendingWrite {
+            file_offset: DATA_BLOCK_OFFSET,
+            sector: vec![0xEE; 4096],
+        }],
+    );
+    {
+        let mut f = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        f.set_len(8 * ONE_MIB).unwrap();
+        f.seek(SeekFrom::Start(log_offset)).unwrap();
+        f.write_all(&entry).unwrap();
+        f.seek(SeekFrom::Start(HEADER2_OFFSET)).unwrap();
+        f.write_all(&encode_header(0, log_guid, log_length, log_offset))
+            .unwrap();
+        f.flush().unwrap();
+    }
+    patch_header_version(&path, 2);
+
+    let reader = VhdxReader::open(&path).expect("should recover via header 2");
+    let mut buf = [0u8; 4096];
+    reader.read_at(0, &mut buf).unwrap();
+    assert!(buf.iter().all(|byte| *byte == 0xEE));
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn unsupported_logical_sector_size_is_rejected() {
+    let path = tmp_path("unsupported_sector_size");
+    build_vhdx(&path, &ramp_block());
+    patch(&path, LOGICAL_SECTOR_SIZE_OFFSET, &1024u32.to_le_bytes());
+
+    let err = VhdxReader::open(&path)
+        .err()
+        .expect("expected unsupported sector size to be rejected");
+    assert!(matches!(
+        err,
+        Error::Corrupt("sector_size must be 512 or 4096")
+    ));
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn accepts_4096_logical_sector_size() {
+    let path = tmp_path("sector_size_4096");
+    build_vhdx(&path, &ramp_block());
+    patch(&path, LOGICAL_SECTOR_SIZE_OFFSET, &4096u32.to_le_bytes());
+
+    let reader = VhdxReader::open(&path).expect("4096-byte sectors are valid VHDX");
+    assert_eq!(reader.sector_size(), 4096);
+    let _ = std::fs::remove_file(&path);
 }

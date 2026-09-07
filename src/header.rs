@@ -24,6 +24,7 @@ pub const HEADER_SIZE: usize = 4096;
 pub const HEADER1_OFFSET: u64 = 64 * 1024;
 pub const HEADER2_OFFSET: u64 = 128 * 1024;
 pub const HEADER_SIGNATURE: &[u8; 4] = b"head";
+pub const HEADER_VERSION: u16 = 1;
 
 /// The only log format the specification defines, and so the only one
 /// this crate can parse.
@@ -74,6 +75,9 @@ impl Header {
         log_guid.copy_from_slice(&bytes[48..64]);
         let log_version = read_u16_le(bytes, 64);
         let version = read_u16_le(bytes, 66);
+        if version != HEADER_VERSION {
+            return Err(Error::Corrupt("unsupported VHDX header version"));
+        }
         let log_length = read_u32_le(bytes, 68);
         let log_offset = read_u64_le(bytes, 72);
 
@@ -112,7 +116,7 @@ mod tests {
         h[16..32].copy_from_slice(&[0xAA; 16]); // file_write_guid
         h[32..48].copy_from_slice(&[0xBB; 16]); // data_write_guid
         h[48..64].copy_from_slice(&[0xCC; 16]); // log_guid
-        h[66..68].copy_from_slice(&1u16.to_le_bytes()); // version = 1
+        h[66..68].copy_from_slice(&HEADER_VERSION.to_le_bytes());
         h[68..72].copy_from_slice(&(1u32 << 20).to_le_bytes()); // log_length = 1 MiB
         h[72..80].copy_from_slice(&(4u64 << 20).to_le_bytes()); // log_offset = 4 MiB
         let crc = compute_crc(&h);
@@ -178,6 +182,20 @@ mod tests {
             Error::BadChecksum { what, .. } => assert_eq!(what, "header"),
             other => panic!("expected BadChecksum, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn rejects_unsupported_version() {
+        let mut h = valid_header(1);
+        h[66..68].copy_from_slice(&2u16.to_le_bytes());
+        let crc = compute_crc(&h);
+        h[4..8].copy_from_slice(&crc.to_le_bytes());
+
+        let err = Header::parse(&h).unwrap_err();
+        assert!(matches!(
+            err,
+            Error::Corrupt("unsupported VHDX header version")
+        ));
     }
 
     #[test]
