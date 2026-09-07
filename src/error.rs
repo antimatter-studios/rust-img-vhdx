@@ -31,6 +31,16 @@ pub enum Error {
     },
     /// Write attempted on a reader opened read-only.
     ReadOnly,
+    /// The log holds entries that have not been applied, and the device
+    /// cannot take them.
+    ///
+    /// Distinct from [`Error::ReadOnly`], which describes the *opener*.
+    /// This describes the *file*: it needs work done to it before its
+    /// region table, metadata and BAT mean anything, and the caller's
+    /// available move is to reopen it writable. A non-zero `log_guid`
+    /// alone is not this error — it says a writer stamped the file, not
+    /// that anything is pending.
+    LogNeedsReplay,
     /// Log replay failed mid-stream — image is in an inconsistent state
     /// the reader cannot safely interpret.
     LogReplay(String),
@@ -63,6 +73,11 @@ impl fmt::Display for Error {
                 )
             }
             Error::ReadOnly => write!(f, "VHDX reader is read-only"),
+            Error::LogNeedsReplay => write!(
+                f,
+                "the log holds unreplayed entries and the device is read-only; \
+                 reopen the image writable so the log can be applied"
+            ),
             Error::LogReplay(s) => write!(f, "VHDX log replay failed: {s}"),
         }
     }

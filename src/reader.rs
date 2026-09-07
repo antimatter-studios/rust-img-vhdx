@@ -19,9 +19,14 @@
 //! Both RO and RW opens replay any pending log entries before exposing
 //! the BAT. A read-only open against a writable device will replay in
 //! place (so subsequent reads see post-replay state). On a non-writable
-//! device a non-empty log is reported as `Error::ReadOnly` because we
-//! can't safely interpret the stale data zones without applying the
-//! pending writes first.
+//! device a log that really does hold unapplied entries is reported as
+//! `Error::LogNeedsReplay`, because we can't safely interpret the stale
+//! data zones without applying the pending writes first.
+//!
+//! Whether anything is pending is decided by assembling the chain, not
+//! by the header's `log_guid`. A non-zero GUID says a writer stamped the
+//! file, which is not the same as work waiting to be done — an image
+//! with a stale GUID and an empty chain opens read-only like any other.
 //!
 //! ## Limitations
 //!
@@ -237,9 +242,6 @@ impl VhdxReader {
         //    bytes might be stale). Only attempted when log_offset and
         //    log_length are non-zero AND the log_guid is non-zero.
         if !is_zero_guid(&header.log_guid) && header.log_length > 0 && header.log_offset > 0 {
-            if !replay_capable {
-                return Err(Error::ReadOnly);
-            }
             let mut log_bytes = vec![
                 0u8;
                 span_inside_the_file(
@@ -253,6 +255,26 @@ impl VhdxReader {
                 .map_err(fs_core_to_vhdx_error)?;
             let chain = collect_replay_chain(&log_bytes, &header.log_guid);
             if !chain.is_empty() {
+                // WHETHER WE CAN WRITE IS ASKED HERE, NOT ABOVE.
+                //
+                // A non-zero `log_guid` says a writer opened the file
+                // and stamped a GUID. It does not say anything is
+                // pending: a clean shutdown that failed to zero the
+                // GUID, or a log whose entries have all been
+                // superseded, leaves it set with an empty chain. Only
+                // `collect_replay_chain` can tell the difference, and
+                // it needs no write permission to run, so nothing is
+                // lost by reading the log region first.
+                //
+                // Asking above the read turned away every read-only
+                // opener of a file that needed nothing done to it — a
+                // VHDX on read-only media, inside a read-only disk
+                // image, behind a block-device resource the host handed
+                // over read-only, or simply a file the user does not
+                // own.
+                if !replay_capable {
+                    return Err(Error::LogNeedsReplay);
+                }
                 apply_chain(&dev, &chain)?;
                 // Mark the log as replayed by zeroing the active log
                 // chain region and bumping the header.log_guid to a
@@ -1024,6 +1046,12 @@ fn vhdx_to_fs_core_error(e: Error) -> fs_core::Error {
             fs_core::Error::OutOfBounds { offset, len, size }
         }
         Error::ReadOnly => fs_core::Error::ReadOnly,
+        // Both mean "this needs a writable device", which is the only
+        // thing a `BlockDevice` consumer can act on, so the distinction
+        // this crate draws between the opener and the file does not
+        // survive the narrower vocabulary -- and should not cost a
+        // caller the actionable code.
+        Error::LogNeedsReplay => fs_core::Error::ReadOnly,
         other => fs_core::Error::Custom(other.to_string()),
     }
 }

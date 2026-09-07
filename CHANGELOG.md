@@ -20,10 +20,24 @@ never does.
   `encode_header` wrote a literal `0`, so every replay — which rewrites
   the header to clear the log GUID — silently reset the format the file
   declared itself to be in.
+- **A stale log GUID no longer makes a readable image unopenable.** The
+  decision to refuse a read-only opener was taken from the header's
+  `log_guid` alone, three statements before the log was even read. A
+  non-zero GUID says a writer stamped the file, not that anything is
+  waiting to be applied — a clean shutdown that failed to zero it, or a
+  log whose entries have all been superseded, leaves it set with an empty
+  chain. Such images are read by every other tool and were refused here,
+  with a message describing the opener rather than the file. The
+  capability test now happens after the chain is assembled.
 
 ### Added
 
 - `Header::log_version` and the `header::LOG_VERSION_V0` constant.
+- `Error::LogNeedsReplay`, for a log that genuinely holds unapplied
+  entries on a device that cannot take them. `Error::ReadOnly` describes
+  the opener; this describes the file, and names the move the caller has
+  — reopen it writable. Both map to `fs_core::Error::ReadOnly` across the
+  `BlockDevice` bridge, so a consumer of that surface sees no change.
 
 ## [0.3.5] — 2026-09-06
 

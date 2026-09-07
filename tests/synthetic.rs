@@ -626,3 +626,81 @@ fn a_bat_entry_pointing_past_the_file_is_refused_by_name() {
     drop(r);
     let _ = std::fs::remove_file(&path);
 }
+
+// ---------------------------------------------------------------------------
+// A non-zero log GUID is not the same as a log with work in it
+// ---------------------------------------------------------------------------
+
+/// The header's `log_guid` says a writer opened this file and stamped a
+/// GUID. It does not say there are writes waiting to be applied: a clean
+/// shutdown that failed to zero the GUID, or a log whose entries have all
+/// been superseded, leaves it set with nothing pending.
+///
+/// So a read-only opener must not be turned away on the GUID alone. The
+/// image below is readable by every other tool; the only reason it was
+/// refused is that the opener could not have written to it.
+#[test]
+fn a_stale_log_guid_with_nothing_pending_opens_on_a_read_only_device() {
+    let path = tmp_path("stale_log_guid");
+    let block0 = pattern_block(11);
+    build_big_vhdx(&path, &block0);
+
+    // A live-looking log GUID over a log region that holds nothing: the
+    // chain is empty, so there is nothing to replay.
+    let log_guid = [0x5Au8; 16];
+    arm_the_log(&path, &vec![0u8; 4096], &log_guid);
+
+    let dev = std::sync::Arc::new(fs_core::FileDevice::open(&path).unwrap());
+    let r = VhdxReader::open_on_device(dev)
+        .expect("an image with nothing to replay must open on a read-only device");
+
+    let mut got = [0u8; 64];
+    r.read_at(0, &mut got).unwrap();
+    assert_eq!(
+        got[..],
+        block0[..64],
+        "the image did not read back correctly"
+    );
+    drop(r);
+    let _ = std::fs::remove_file(&path);
+}
+
+/// The complement, which is what stops the fix above from becoming
+/// "ignore the log": a chain that really does hold unapplied entries,
+/// on a device that cannot take them, is still refused — and the
+/// refusal now describes the file's state rather than the opener's, so
+/// a caller is told the thing it can act on.
+#[test]
+fn a_pending_log_on_a_read_only_device_is_still_refused() {
+    let path = tmp_path("pending_log_ro");
+    let block0 = pattern_block(12);
+    build_big_vhdx(&path, &block0);
+
+    let log_guid = [0x6Bu8; 16];
+    arm_the_log(
+        &path,
+        &zero_descriptor_entry(2, &log_guid, BIG_DATA_BLOCK0_OFFSET, 4096),
+        &log_guid,
+    );
+
+    let dev = std::sync::Arc::new(fs_core::FileDevice::open(&path).unwrap());
+    match VhdxReader::open_on_device(dev) {
+        Err(vhdx::Error::LogNeedsReplay) => {}
+        Err(e) => panic!("expected LogNeedsReplay, got: {e}"),
+        Ok(_) => panic!("a log with unapplied entries was opened on a read-only device"),
+    }
+
+    // And nothing was written: the block the log wanted zeroed is intact.
+    let mut f = std::fs::File::open(&path).unwrap();
+    f.seek(SeekFrom::Start(BIG_DATA_BLOCK0_OFFSET)).unwrap();
+    let mut after = vec![0u8; 4096];
+    use std::io::Read;
+    f.read_exact(&mut after).unwrap();
+    assert_eq!(
+        after[..],
+        block0[..4096],
+        "the read-only open applied the log"
+    );
+
+    let _ = std::fs::remove_file(&path);
+}
