@@ -281,15 +281,20 @@ fn append_region_entry(path: &std::path::Path, table_offset: u64, guid: [u8; 16]
 }
 
 #[test]
-fn unsupported_header_version_is_rejected_after_crc_recompute() {
-    let path = tmp_path("unsupported_header_version");
+fn falls_back_to_header2_when_header1_version_is_unsupported() {
+    let path = tmp_path("header2_fallback_unsupported_version");
     build_vhdx(&path, &ramp_block());
+
+    // A real VHDX has two redundant header copies. Keep header 2 valid so
+    // this test exercises fallback after header 1 is rejected for its
+    // unsupported version, rather than merely observing NoValidHeader.
+    patch(&path, HEADER2_OFFSET, &encode_header(2, [0u8; 16], 0, 0));
     patch_header_version(&path, 2);
 
-    let err = VhdxReader::open(&path)
-        .err()
-        .expect("expected unsupported header version to be rejected");
-    assert!(matches!(err, Error::NoValidHeader), "got {err:?}");
+    let reader = VhdxReader::open(&path).expect("should recover via header 2");
+    let mut buf = [0u8; 4];
+    reader.read_at(0, &mut buf).unwrap();
+    assert_eq!(buf, [0, 1, 2, 3]);
     let _ = std::fs::remove_file(&path);
 }
 
