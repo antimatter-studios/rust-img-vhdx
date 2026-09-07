@@ -37,6 +37,23 @@ fn patch(path: &std::path::Path, offset: u64, bytes: &[u8]) {
     f.flush().unwrap();
 }
 
+/// Patch a field inside a header slot and repair that slot's CRC-32C.
+///
+/// Most tests here want a structure the reader should reject, and a
+/// deliberately broken checksum is enough. Some want the opposite: a
+/// header that is entirely well-formed and simply says something the
+/// reader does not know how to honour. Repairing the CRC is what makes
+/// the second kind possible — otherwise the file fails as a checksum
+/// mismatch and never reaches the check under test.
+fn patch_header_field(path: &std::path::Path, slot: u64, field_offset: usize, bytes: &[u8]) {
+    let mut image = std::fs::read(path).unwrap();
+    let at = slot as usize;
+    image[at + field_offset..at + field_offset + bytes.len()].copy_from_slice(bytes);
+    let crc = vhdx::header::compute_crc(&image[at..at + HEADER_SIZE]);
+    image[at + 4..at + 8].copy_from_slice(&crc.to_le_bytes());
+    std::fs::write(path, &image).unwrap();
+}
+
 #[test]
 fn valid_image_opens_as_baseline() {
     // Guards the corruption tests below: if this fails the fixture is
@@ -47,6 +64,52 @@ fn valid_image_opens_as_baseline() {
     let mut buf = [0u8; 16];
     r.read_at(0, &mut buf).unwrap();
     assert_eq!(buf[1], 1);
+    let _ = std::fs::remove_file(&path);
+}
+
+/// `log_version` says which log format the file uses. Version 0 is the
+/// only one defined, and a reader that meets another value has to stop:
+/// the log region is then not one it can reason about, and replaying it
+/// is a *write* — the version-0 parser's idea of the descriptors gets
+/// applied on top of real data.
+///
+/// The header CRC covers the field, so this fixture is not a corrupt
+/// image. It is exactly the shape a future revision of the format has.
+#[test]
+fn an_unknown_log_version_is_unsupported_not_replayed() {
+    let path = tmp_path("log_version_1");
+    build_vhdx(&path, &ramp_block());
+    // Baseline: the fixture opens before the patch, so the refusal below
+    // is attributable to the field and not to the fixture.
+    VhdxReader::open(&path).expect("fixture precondition");
+
+    patch_header_field(&path, HEADER1_OFFSET, 64, &1u16.to_le_bytes());
+
+    match VhdxReader::open(&path) {
+        Err(Error::Unsupported(msg)) => assert!(
+            msg.contains("log version"),
+            "the refusal must name the log version, got {msg:?}"
+        ),
+        Err(other) => panic!("expected Unsupported, got {other:?}"),
+        Ok(_) => panic!("opened an image whose log format we cannot parse"),
+    }
+    let _ = std::fs::remove_file(&path);
+}
+
+/// The refusal is not gated on the log being dirty. This fixture's
+/// `log_guid` is zero, so nothing would be replayed today — and it is
+/// still refused, because a later write would append to a log region
+/// whose format this crate does not know.
+#[test]
+fn an_unknown_log_version_is_refused_even_with_an_empty_log() {
+    let path = tmp_path("log_version_clean");
+    build_vhdx(&path, &ramp_block());
+    patch_header_field(&path, HEADER1_OFFSET, 64, &0xFFFFu16.to_le_bytes());
+
+    let err = VhdxReader::open(&path)
+        .err()
+        .expect("expected Unsupported, got Ok");
+    assert!(matches!(err, Error::Unsupported(_)), "got {err:?}");
     let _ = std::fs::remove_file(&path);
 }
 

@@ -25,12 +25,23 @@ pub const HEADER1_OFFSET: u64 = 64 * 1024;
 pub const HEADER2_OFFSET: u64 = 128 * 1024;
 pub const HEADER_SIGNATURE: &[u8; 4] = b"head";
 
+/// The only log format the specification defines, and so the only one
+/// this crate can parse.
+///
+/// `log_version` is the format's forward-compatibility latch. An
+/// implementation that meets a value it does not know is required to
+/// stop, because the log region it is looking at is not one it can
+/// reason about — and log replay is a *write*.
+pub const LOG_VERSION_V0: u16 = 0;
+
 #[derive(Debug, Clone)]
 pub struct Header {
     pub sequence_number: u64,
     pub file_write_guid: [u8; 16],
     pub data_write_guid: [u8; 16],
     pub log_guid: [u8; 16],
+    /// Format version of the log region. See [`LOG_VERSION_V0`].
+    pub log_version: u16,
     pub version: u16,
     pub log_length: u32,
     pub log_offset: u64,
@@ -61,7 +72,7 @@ impl Header {
         data_write_guid.copy_from_slice(&bytes[32..48]);
         let mut log_guid = [0u8; 16];
         log_guid.copy_from_slice(&bytes[48..64]);
-        let _log_version = read_u16_le(bytes, 64);
+        let log_version = read_u16_le(bytes, 64);
         let version = read_u16_le(bytes, 66);
         let log_length = read_u32_le(bytes, 68);
         let log_offset = read_u64_le(bytes, 72);
@@ -71,6 +82,7 @@ impl Header {
             file_write_guid,
             data_write_guid,
             log_guid,
+            log_version,
             version,
             log_length,
             log_offset,
@@ -119,6 +131,23 @@ mod tests {
         assert_eq!(parsed.file_write_guid, [0xAA; 16]);
         assert_eq!(parsed.data_write_guid, [0xBB; 16]);
         assert_eq!(parsed.log_guid, [0xCC; 16]);
+        assert_eq!(parsed.log_version, LOG_VERSION_V0);
+    }
+
+    /// `log_version` used to be read into `_` and dropped. Whatever the
+    /// reader does with it, it first has to survive the parse.
+    #[test]
+    fn exposes_a_log_version_it_does_not_recognise() {
+        let mut h = valid_header(1);
+        h[64..66].copy_from_slice(&1u16.to_le_bytes());
+        let crc = compute_crc(&h);
+        h[4..8].copy_from_slice(&crc.to_le_bytes());
+
+        let parsed = Header::parse(&h).expect("parsing is not where an unknown version is judged");
+        assert_eq!(parsed.log_version, 1);
+        // The neighbouring `version` field is a different thing at a
+        // different offset, and must not have moved.
+        assert_eq!(parsed.version, 1);
     }
 
     #[test]

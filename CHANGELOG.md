@@ -7,6 +7,24 @@ never does.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A log format we cannot parse is refused instead of replayed.** The
+  header's `log_version` was read into `_` and discarded, so an image
+  declaring any log format at all was handed to the version-0 parser and
+  its descriptors applied — a write, on top of real data. `open` now
+  refuses a `log_version` other than 0, unconditionally rather than only
+  when the log is dirty, since a later write would append to that region
+  too. `qemu-img` refuses such a file outright; the two now agree.
+- **Rewriting a header preserves the log version it carries.**
+  `encode_header` wrote a literal `0`, so every replay — which rewrites
+  the header to clear the log GUID — silently reset the format the file
+  declared itself to be in.
+
+### Added
+
+- `Header::log_version` and the `header::LOG_VERSION_V0` constant.
+
 ## [0.3.5] — 2026-09-06
 
 ### Fixed
