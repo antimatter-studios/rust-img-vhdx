@@ -926,3 +926,57 @@ fn a_bat_region_length_that_is_not_whole_entries_is_refused() {
         Err(e) => panic!("a ragged BAT region gave {e:?}"),
     }
 }
+
+// ---------------------------------------------------------------------------
+// Differencing images
+// ---------------------------------------------------------------------------
+
+/// A differencing image is refused at open, not at the first read.
+///
+/// The refusal used to live in `transfer_end`, so `open` succeeded and
+/// the geometry accessors all answered — and then every read failed. A
+/// `VhdxReader` is handed out as an `fs_core::BlockDevice`, and the
+/// stack above it takes a successful open as "this is a usable
+/// device": what it got was a device reporting an 8 GiB size and
+/// failing every read, which a partition probe cannot tell from an I/O
+/// error on a real disk.
+///
+/// The message has to name differencing rather than the metadata item,
+/// because a differencing image carries a required ParentLocator and a
+/// required-item check would otherwise refuse it as an unrecognised
+/// GUID — a true statement that tells a user nothing.
+#[test]
+fn a_differencing_image_is_refused_at_open() {
+    let path = tmp_path("differencing");
+    build_vhdx_with_file_params_flags(&path, &pattern_block(12), 0x2);
+
+    match VhdxReader::open(&path) {
+        Err(Error::Unsupported(m)) => assert!(
+            m.contains("differencing"),
+            "refused, but not as a differencing image: {m}"
+        ),
+        Ok(_) => panic!(
+            "a differencing image opened; every read would then fail and the caller \
+             would be told about its hardware"
+        ),
+        Err(e) => panic!("a differencing image gave {e:?}"),
+    }
+}
+
+/// The flags word is read rather than assumed: bit 0 is a different
+/// flag and must not refuse anything.
+///
+/// `leave_blocks_allocated` says how the writer treats freed blocks;
+/// it has nothing to do with parents. A check written against the whole
+/// word rather than bit 1 would refuse an ordinary image that carries
+/// it, which is the too-strict failure and the worse one.
+#[test]
+fn the_leave_blocks_allocated_flag_is_not_a_parent() {
+    let path = tmp_path("leave_blocks_allocated");
+    build_vhdx_with_file_params_flags(&path, &pattern_block(13), 0x1);
+
+    let r = VhdxReader::open(&path).expect("bit 0 is not a parent");
+    assert!(!r.has_parent());
+    let mut buf = [0u8; 16];
+    r.read_at(0, &mut buf).expect("and the image still reads");
+}

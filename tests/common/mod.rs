@@ -119,8 +119,23 @@ pub fn encode_region_table(bat_offset: u64, bat_len: u32, meta_offset: u64) -> V
 }
 
 /// Encode the metadata region (FileParameters, VirtualDiskSize,
-/// LogicalSectorSize).
+/// LogicalSectorSize) with `FileParameters.flags` at zero: no parent.
 pub fn encode_metadata(block_size: u32, virtual_disk_size: u64, sector_size: u32) -> Vec<u8> {
+    encode_metadata_with_flags(block_size, virtual_disk_size, sector_size, 0)
+}
+
+/// As [`encode_metadata`], with `FileParameters.flags` given.
+///
+/// Bit 0 is `leave_blocks_allocated` and bit 1 is `has_parent`, and the
+/// second is what makes an image a differencing one. The flags used to
+/// be hardcoded to zero here, so no fixture could be a differencing
+/// image at all.
+pub fn encode_metadata_with_flags(
+    block_size: u32,
+    virtual_disk_size: u64,
+    sector_size: u32,
+    file_params_flags: u32,
+) -> Vec<u8> {
     let mut meta = vec![0u8; METADATA_REGION_SIZE];
     meta[0..8].copy_from_slice(b"metadata");
     meta[10..12].copy_from_slice(&3u16.to_le_bytes()); // entry_count = 3
@@ -154,7 +169,7 @@ pub fn encode_metadata(block_size: u32, virtual_disk_size: u64, sector_size: u32
     meta[file_params_off as usize..(file_params_off + 4) as usize]
         .copy_from_slice(&block_size.to_le_bytes());
     meta[(file_params_off + 4) as usize..(file_params_off + 8) as usize]
-        .copy_from_slice(&0u32.to_le_bytes()); // flags = 0 (no parent)
+        .copy_from_slice(&file_params_flags.to_le_bytes());
     meta[virt_size_off as usize..(virt_size_off + 8) as usize]
         .copy_from_slice(&virtual_disk_size.to_le_bytes());
     meta[sector_size_off as usize..(sector_size_off + 4) as usize]
@@ -162,9 +177,26 @@ pub fn encode_metadata(block_size: u32, virtual_disk_size: u64, sector_size: u32
     meta
 }
 
+/// As [`build_vhdx`], with `FileParameters.flags` given.
+///
+/// Bit 1 is `has_parent`, which is what makes an image a differencing
+/// one — and no fixture could set it while the metadata builder
+/// hardcoded the word to zero.
+pub fn build_vhdx_with_file_params_flags(
+    path: &PathBuf,
+    data: &[u8; BLOCK_SIZE as usize],
+    file_params_flags: u32,
+) {
+    build_vhdx_inner(path, data, file_params_flags)
+}
+
 /// Build a minimal 1-block VHDX. Header 1 is valid (sequence=1),
 /// header 2 is zero (invalid), so the reader picks header 1.
 pub fn build_vhdx(path: &PathBuf, data: &[u8; BLOCK_SIZE as usize]) {
+    build_vhdx_inner(path, data, 0)
+}
+
+fn build_vhdx_inner(path: &PathBuf, data: &[u8; BLOCK_SIZE as usize], file_params_flags: u32) {
     let mut f = File::create(path).unwrap();
     f.set_len(TOTAL_FILE_SIZE).unwrap();
 
@@ -180,7 +212,12 @@ pub fn build_vhdx(path: &PathBuf, data: &[u8; BLOCK_SIZE as usize]) {
     )
     .unwrap();
     f.write_all_at(
-        &encode_metadata(BLOCK_SIZE, VIRTUAL_DISK_SIZE, SECTOR_SIZE),
+        &encode_metadata_with_flags(
+            BLOCK_SIZE,
+            VIRTUAL_DISK_SIZE,
+            SECTOR_SIZE,
+            file_params_flags,
+        ),
         METADATA_REGION_OFFSET,
     )
     .unwrap();
