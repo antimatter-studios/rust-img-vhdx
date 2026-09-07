@@ -178,52 +178,10 @@ fn ro_open_against_writable_file_replays_dirty_log() {
     let block0 = pattern_block(4);
     build_big_vhdx(&path, &block0);
 
-    // 2. Inject a dirty log: forge a single-entry log that overwrites
-    //    a 4 KiB sector inside block 0 with 0xEE, and bump the
-    //    header's log_guid so the reader thinks the log is active.
-    let log_guid = [0x77u8; 16];
-    let sector = vec![0xEEu8; 4096];
-    let entry = vhdx::log::encode_entry(
-        2,
-        0,
-        &log_guid,
-        BIG_TOTAL_FILE_SIZE,
-        BIG_TOTAL_FILE_SIZE,
-        &[vhdx::log::PendingWrite {
-            file_offset: BIG_DATA_BLOCK0_OFFSET + 8192,
-            sector: sector.clone(),
-        }],
-    );
-
-    {
-        let mut f = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&path)
-            .unwrap();
-        // Splice the entry into the log region.
-        f.seek(SeekFrom::Start(BIG_LOG_OFFSET)).unwrap();
-        f.write_all(&entry).unwrap();
-
-        // Bump header.log_guid, sequence_number; rewrite header 2 (the
-        // currently-inactive slot) so it wins on next open.
-        let mut hdr = vec![0u8; HEADER_SIZE];
-        hdr[0..4].copy_from_slice(b"head");
-        hdr[8..16].copy_from_slice(&5u64.to_le_bytes());
-        hdr[48..64].copy_from_slice(&log_guid);
-        hdr[66..68].copy_from_slice(&1u16.to_le_bytes());
-        hdr[68..72].copy_from_slice(&BIG_LOG_LENGTH.to_le_bytes());
-        hdr[72..80].copy_from_slice(&BIG_LOG_OFFSET.to_le_bytes());
-        let crc = {
-            let mut tmp = hdr.clone();
-            tmp[4..8].fill(0);
-            crc32c::crc32c(&tmp)
-        };
-        hdr[4..8].copy_from_slice(&crc.to_le_bytes());
-        f.seek(SeekFrom::Start(HEADER2_OFFSET)).unwrap();
-        f.write_all(&hdr).unwrap();
-        f.flush().unwrap();
-    }
+    // 2. Inject a dirty log: a single-entry chain that overwrites a
+    //    4 KiB sector inside block 0 with 0xEE, and a header naming it
+    //    so the reader thinks the log is active.
+    inject_dirty_log(&path, [0x77u8; 16]);
 
     // 3. Open RO. The file is RW on disk so replay can run in place.
     let r = VhdxReader::open(&path).unwrap();
@@ -700,6 +658,135 @@ fn a_pending_log_on_a_read_only_device_is_still_refused() {
         after[..],
         block0[..4096],
         "the read-only open applied the log"
+    );
+
+    let _ = std::fs::remove_file(&path);
+}
+
+// ---------------------------------------------------------------------------
+// What replay leaves behind, and where the next write goes
+// ---------------------------------------------------------------------------
+
+/// One header slot's 4 KiB, straight off the file.
+fn header_slot(path: &std::path::Path, offset: u64) -> Vec<u8> {
+    let bytes = std::fs::read(path).unwrap();
+    bytes[offset as usize..offset as usize + HEADER_SIZE].to_vec()
+}
+
+/// `sequence_number` lives at +8, `log_guid` at +48.
+fn slot_sequence(slot: &[u8]) -> u64 {
+    u64::from_le_bytes(slot[8..16].try_into().unwrap())
+}
+
+fn slot_log_guid(slot: &[u8]) -> [u8; 16] {
+    slot[48..64].try_into().unwrap()
+}
+
+/// Plant a replayable single-entry log and the header that names it,
+/// in slot 2, at sequence 5.
+fn inject_dirty_log(path: &std::path::Path, log_guid: [u8; 16]) {
+    let sector = vec![0xEEu8; 4096];
+    let entry = vhdx::log::encode_entry(
+        2,
+        0,
+        &log_guid,
+        BIG_TOTAL_FILE_SIZE,
+        BIG_TOTAL_FILE_SIZE,
+        &[vhdx::log::PendingWrite {
+            file_offset: BIG_DATA_BLOCK0_OFFSET + 8192,
+            sector,
+        }],
+    );
+
+    let mut f = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .unwrap();
+    f.seek(SeekFrom::Start(BIG_LOG_OFFSET)).unwrap();
+    f.write_all(&entry).unwrap();
+
+    let mut hdr = vec![0u8; HEADER_SIZE];
+    hdr[0..4].copy_from_slice(b"head");
+    hdr[8..16].copy_from_slice(&5u64.to_le_bytes());
+    hdr[48..64].copy_from_slice(&log_guid);
+    hdr[66..68].copy_from_slice(&1u16.to_le_bytes());
+    hdr[68..72].copy_from_slice(&BIG_LOG_LENGTH.to_le_bytes());
+    hdr[72..80].copy_from_slice(&BIG_LOG_OFFSET.to_le_bytes());
+    let crc = {
+        let mut tmp = hdr.clone();
+        tmp[4..8].fill(0);
+        crc32c::crc32c(&tmp)
+    };
+    hdr[4..8].copy_from_slice(&crc.to_le_bytes());
+    f.seek(SeekFrom::Start(HEADER2_OFFSET)).unwrap();
+    f.write_all(&hdr).unwrap();
+    f.flush().unwrap();
+}
+
+/// The first journalled write after a replay must rotate *off* the
+/// header the replay wrote, not onto it.
+///
+/// Replay rewrites the header into the other slot with
+/// `sequence_number + 1` and `log_guid` cleared, and that slot is then
+/// the file's current header. The reader used to be built from the pair
+/// it had before that write — the older sequence number, and the slot
+/// that is now the stale one. Its first journalled write then rotated
+/// onto the only current header, leaving as the fallback a header that
+/// still advertises the chain the replay had just erased.
+///
+/// A crash in that window is what it costs: the newer slot is torn, so
+/// `pick_header` falls back to the older one, which names a log whose
+/// region is zeroed. Nothing replays, nothing clears the guid, and an
+/// image that is in fact intact opens as dirty — or, on a read-only
+/// backing store, does not open at all.
+///
+/// Asserting on the raw file rather than on the reader's own view,
+/// because the reader's view is the thing under test.
+#[test]
+fn a_journalled_write_after_replay_rotates_off_the_header_replay_wrote() {
+    let path = tmp_path("replay_then_write");
+    build_big_vhdx(&path, &pattern_block(9));
+    inject_dirty_log(&path, [0x77u8; 16]);
+
+    let r = VhdxReader::open_rw(&path).unwrap();
+
+    // Replay ran: slot 1 now holds sequence 6 with the guid cleared,
+    // and slot 2 still holds the sequence-5 header that names the chain.
+    let opened_1 = header_slot(&path, HEADER1_OFFSET);
+    let opened_2 = header_slot(&path, HEADER2_OFFSET);
+    assert_eq!(slot_sequence(&opened_1), 6, "replay did not rewrite slot 1");
+    assert_eq!(
+        slot_log_guid(&opened_1),
+        [0u8; 16],
+        "the guid was not cleared"
+    );
+    assert_eq!(slot_sequence(&opened_2), 5, "slot 2 changed unexpectedly");
+
+    // One allocating write, entirely inside block 1, which is not on
+    // disk: exactly one journalled BAT change and so exactly one header
+    // rotation.
+    r.write_at(BIG_BLOCK_SIZE as u64, &[0xA5u8; 4096]).unwrap();
+    r.flush().unwrap();
+
+    let written_1 = header_slot(&path, HEADER1_OFFSET);
+    let written_2 = header_slot(&path, HEADER2_OFFSET);
+    assert_eq!(
+        written_1, opened_1,
+        "the journalled write landed on the header the replay had just \
+         written, so the fallback slot is the pre-replay header that \
+         still names an erased chain"
+    );
+    assert_eq!(
+        slot_sequence(&written_2),
+        7,
+        "the rotation did not continue from the header replay wrote"
+    );
+    assert_ne!(
+        slot_sequence(&written_1),
+        slot_sequence(&written_2),
+        "both slots carry the same sequence number, which is the tie \
+         `pick_header` documents as meaning the two describe the same state"
     );
 
     let _ = std::fs::remove_file(&path);
