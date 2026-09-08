@@ -99,7 +99,6 @@ pub struct VhdxReader {
     /// In-memory BAT — cached at open. Mutex-wrapped so writers can
     /// publish allocations atomically.
     bat: Mutex<Vec<BatEntry>>,
-    has_parent: bool,
     writable: bool,
 }
 
@@ -512,6 +511,41 @@ impl VhdxReader {
             return Err(Error::Corrupt("sector_size must be 512 or 4096"));
         }
 
+        // A differencing image is refused here rather than at its
+        // first read.
+        //
+        // The refusal used to live in `transfer_end`, so `open`
+        // succeeded and `virtual_size`, `block_size` and `sector_size`
+        // all answered — and then every read failed. A `VhdxReader` is
+        // handed out as an `fs_core::BlockDevice`, and the stack above
+        // it takes a successful open as "this is a usable device": what
+        // it got was a device reporting a size and failing every read,
+        // which a partition probe cannot tell from an I/O error on a
+        // real disk. The user is then told about their hardware rather
+        // than about an unsupported image type.
+        //
+        // Everything else unsupported is refused at open — an unknown
+        // log version, a block size outside the legal range, a sector
+        // size that is not 512 or 4096, a required region this crate
+        // does not recognise, a non-writable device for a read-write
+        // open. Differencing was the one exception, and both the README
+        // and the shipped C header already list it as unsupported, so
+        // this only makes the point at which it is reported match what
+        // is written down.
+        //
+        // Deliberately before the region and metadata work below that
+        // could refuse it for a less useful reason: a differencing
+        // image carries a ParentLocator item marked required, so a
+        // required-item check would refuse it as "unrecognised required
+        // metadata item A8D35F2D-…" instead of saying what it is.
+        if file_params.has_parent() {
+            return Err(Error::Unsupported(
+                "a differencing VHDX (one with a parent chain), which this crate does not \
+                 implement — the data lives partly in the parent, so reading this file \
+                 alone would serve zeros for everything the parent still owns",
+            ));
+        }
+
         let chunk_ratio = compute_chunk_ratio(file_params.block_size, sector_size);
         if chunk_ratio == 0 {
             return Err(Error::Corrupt("chunk_ratio = 0"));
@@ -559,7 +593,6 @@ impl VhdxReader {
             chunk_ratio,
             bat_region_off: bat_region.file_offset,
             bat: Mutex::new(bat),
-            has_parent: file_params.has_parent(),
             writable,
         })
     }
@@ -576,8 +609,14 @@ impl VhdxReader {
         self.sector_size
     }
 
+    /// Whether this image has a parent — always `false`.
+    ///
+    /// A differencing image is refused at open, so a live reader is
+    /// never one. Kept because callers ask it, and answering `false`
+    /// truthfully describes every reader that exists; removing it would
+    /// break them for no gain.
     pub fn has_parent(&self) -> bool {
-        self.has_parent
+        false
     }
 
     pub fn is_writable(&self) -> bool {
@@ -624,15 +663,11 @@ impl VhdxReader {
     ///
     /// `read_at` and `write_at` opened with the same fifteen lines, and
     /// the only real difference was the sentence in the differencing
-    /// error. That sentence is the argument; everything else is one
-    /// definition now, so the two entry points cannot drift on which
-    /// offsets they consider in range.
-    fn transfer_end(
-        &self,
-        offset: u64,
-        len: u64,
-        no_parent_support: &'static str,
-    ) -> Result<Option<u64>> {
+    /// error — which is gone, because a differencing image is now
+    /// refused at open and cannot reach either. What is left is one
+    /// definition of which offsets are in range, so the two entry
+    /// points cannot drift on it.
+    fn transfer_end(&self, offset: u64, len: u64) -> Result<Option<u64>> {
         if len == 0 {
             return Ok(None);
         }
@@ -645,9 +680,6 @@ impl VhdxReader {
                 len,
                 size: self.virtual_size,
             });
-        }
-        if self.has_parent {
-            return Err(Error::Unsupported(no_parent_support));
         }
         Ok(Some(end))
     }
@@ -701,12 +733,7 @@ impl VhdxReader {
     }
 
     pub fn read_at(&self, offset: u64, buf: &mut [u8]) -> Result<()> {
-        let Some(end) = self.transfer_end(
-            offset,
-            buf.len() as u64,
-            "VHDX with parent (differencing) — chain walking not implemented",
-        )?
-        else {
+        let Some(end) = self.transfer_end(offset, buf.len() as u64)? else {
             return Ok(());
         };
 
@@ -773,12 +800,7 @@ impl VhdxReader {
         if !self.writable {
             return Err(Error::ReadOnly);
         }
-        let Some(end) = self.transfer_end(
-            offset,
-            buf.len() as u64,
-            "VHDX with parent (differencing) — write not implemented",
-        )?
-        else {
+        let Some(end) = self.transfer_end(offset, buf.len() as u64)? else {
             return Ok(());
         };
 
