@@ -610,3 +610,230 @@ fn a_replayable_chain_at_a_hostile_log_offset_does_not_erase_the_region() {
     );
     let _ = std::fs::remove_file(&path);
 }
+
+/// A refused image is an unmodified image, including the descriptor's
+/// own target.
+///
+/// `#43` moved the log-region *erase* below the region-table check, so
+/// a hostile `log_offset` can no longer wipe a megabyte. `apply_chain`
+/// still ran above that check, so a replayed chain's descriptors landed
+/// on a file the reader then refused — and a caller handed
+/// `Err(Corrupt)` has no reason to suspect the file changed underneath
+/// it.
+///
+/// Bounded is not the same as small. A descriptor's target is checked
+/// against `allowed_extent`, which is at least the file's current size,
+/// so one forged descriptor naming offset 0 with a length covering the
+/// whole file passes it — the image is erased and the open then blames
+/// the image. That is the case this asserts: whole-file bytes, before
+/// and after, not just the four kilobytes the older fixture watched.
+#[test]
+fn a_refused_image_is_not_written_to_by_the_replay_that_precedes_the_refusal() {
+    let path = tmp_path("replay_before_refusal");
+    let block0 = pattern_block(6);
+    build_big_vhdx(&path, &block0);
+
+    const TARGET: u64 = BIG_DATA_BLOCK0_OFFSET + 8192;
+    let log_guid = [0x77u8; 16];
+    let entry = vhdx::log::encode_entry(
+        2,
+        0,
+        &log_guid,
+        BIG_TOTAL_FILE_SIZE,
+        BIG_TOTAL_FILE_SIZE,
+        &[vhdx::log::PendingWrite {
+            file_offset: TARGET,
+            sector: vec![0xEEu8; 4096],
+        }],
+    );
+
+    {
+        let mut f = open_file_rw(&path);
+        // The log is declared over the metadata region — somewhere it
+        // may not be — and the chain really is there.
+        f.write_all_at(&entry, BIG_METADATA_OFFSET).unwrap();
+        let mut hdr = encode_header(5, log_guid, BIG_LOG_LENGTH, BIG_METADATA_OFFSET);
+        hdr.truncate(HEADER_SIZE);
+        f.write_all_at(&hdr, HEADER2_OFFSET).unwrap();
+    }
+
+    let before = std::fs::read(&path).unwrap();
+    assert_eq!(
+        &before[BIG_METADATA_OFFSET as usize..BIG_METADATA_OFFSET as usize + 4],
+        b"loge",
+        "the fixture must actually contain a log entry"
+    );
+    assert_ne!(
+        &before[TARGET as usize..TARGET as usize + 8],
+        &[0xEEu8; 8],
+        "the target already holds what replay would write, so this test could not tell"
+    );
+
+    let err = VhdxReader::open_rw(&path)
+        .err()
+        .expect("a log region over a declared region must be refused");
+    // The message as well as the variant. A fix that prevented the
+    // write but left the diagnostic saying something else would pass a
+    // test written only against the bytes — and what a caller is told
+    // is half of what is wrong here: "this file is bad" is only honest
+    // once it is also true that the reader left it alone.
+    match &err {
+        Error::Corrupt(m) => assert!(
+            m.contains("log region overlaps"),
+            "refused, but not for the overlap: {m}"
+        ),
+        other => panic!("got {other:?}"),
+    }
+
+    let after = std::fs::read(&path).unwrap();
+    assert_eq!(
+        &after[TARGET as usize..TARGET as usize + 8],
+        &before[TARGET as usize..TARGET as usize + 8],
+        "the chain was applied before the refusal, so a caller told the file is bad \
+         is holding a file this reader has just modified"
+    );
+    assert_eq!(
+        after.len(),
+        before.len(),
+        "the file changed size on an open that failed"
+    );
+    assert!(
+        after == before,
+        "the refused open modified the image somewhere"
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+/// The same refusal, with the descriptor that erases everything.
+///
+/// This is the version that makes the previous test's bound worth
+/// stating: `allowed_extent` is at least the file's current size, so a
+/// descriptor naming offset 0 is inside it, and a chain of them covers
+/// the image. The refusal has to come first or there is nothing left to
+/// refuse.
+#[test]
+fn a_forged_chain_that_would_erase_the_image_is_refused_before_it_runs() {
+    let path = tmp_path("replay_erases_everything");
+    let block0 = pattern_block(7);
+    build_big_vhdx(&path, &block0);
+
+    let log_guid = [0x77u8; 16];
+    // Eight sectors of zeros starting at offset 0: the file identifier,
+    // both headers, and the region tables.
+    let zeros: Vec<vhdx::log::PendingWrite> = (0..8u64)
+        .map(|i| vhdx::log::PendingWrite {
+            file_offset: i * 4096,
+            sector: vec![0u8; 4096],
+        })
+        .collect();
+    let entry = vhdx::log::encode_entry(
+        2,
+        0,
+        &log_guid,
+        BIG_TOTAL_FILE_SIZE,
+        BIG_TOTAL_FILE_SIZE,
+        &zeros,
+    );
+
+    {
+        let mut f = open_file_rw(&path);
+        f.write_all_at(&entry, BIG_METADATA_OFFSET).unwrap();
+        let mut hdr = encode_header(5, log_guid, BIG_LOG_LENGTH, BIG_METADATA_OFFSET);
+        hdr.truncate(HEADER_SIZE);
+        f.write_all_at(&hdr, HEADER2_OFFSET).unwrap();
+    }
+
+    let before = std::fs::read(&path).unwrap();
+    let err = VhdxReader::open_rw(&path)
+        .err()
+        .expect("a log region over a declared region must be refused");
+    match &err {
+        Error::Corrupt(m) => assert!(
+            m.contains("log region overlaps"),
+            "refused, but not for the overlap: {m}"
+        ),
+        other => panic!("got {other:?}"),
+    }
+
+    let after = std::fs::read(&path).unwrap();
+    assert_eq!(
+        &after[..8],
+        b"vhdxfile",
+        "the file identifier was erased by a replay the reader then refused"
+    );
+    assert!(after == before, "the refused open modified the image");
+    let _ = std::fs::remove_file(&path);
+}
+
+/// The check after replay is not a duplicate of the one before it.
+///
+/// A replayed chain may rewrite the region table itself — that is the
+/// whole reason the module reads the table again at step 4 and treats
+/// the second read as authoritative. So a file can pass the check
+/// before replay and fail it after: the table on disk beforehand
+/// declares regions clear of the log, and the chain replaces it with
+/// one that does not.
+///
+/// That is the case the second call exists for, and without this test
+/// it is unwitnessed: with the pre-replay check in place, every other
+/// hostile-log fixture here is refused before the second call is
+/// reached.
+#[test]
+fn a_replay_that_moves_a_region_onto_the_log_is_refused_after_it_runs() {
+    let path = tmp_path("replay_moves_a_region");
+    let block0 = pattern_block(8);
+    build_big_vhdx(&path, &block0);
+
+    // A region table declaring the BAT exactly where the log lives.
+    // Innocuous on disk beforehand — it is not there yet.
+    let hostile_table = encode_region_table(BIG_LOG_OFFSET, 4096, BIG_METADATA_OFFSET);
+    let log_guid = [0x77u8; 16];
+    let writes: Vec<vhdx::log::PendingWrite> = hostile_table
+        .chunks(4096)
+        .enumerate()
+        .map(|(i, chunk)| vhdx::log::PendingWrite {
+            file_offset: REGION_TABLE1_OFFSET + (i as u64) * 4096,
+            sector: chunk.to_vec(),
+        })
+        .collect();
+    let entry = vhdx::log::encode_entry(
+        2,
+        0,
+        &log_guid,
+        BIG_TOTAL_FILE_SIZE,
+        BIG_TOTAL_FILE_SIZE,
+        &writes,
+    );
+
+    {
+        let mut f = open_file_rw(&path);
+        // The log is where the header says it is, and where the table
+        // as it stands says nothing lives.
+        f.write_all_at(&entry, BIG_LOG_OFFSET).unwrap();
+        let mut hdr = encode_header(5, log_guid, BIG_LOG_LENGTH, BIG_LOG_OFFSET);
+        hdr.truncate(HEADER_SIZE);
+        f.write_all_at(&hdr, HEADER2_OFFSET).unwrap();
+    }
+
+    let err = VhdxReader::open_rw(&path)
+        .err()
+        .expect("after replay the BAT sits on the log region, which must be refused");
+    match &err {
+        Error::Corrupt(m) => assert!(
+            m.contains("log region overlaps"),
+            "refused, but not for the overlap: {m}"
+        ),
+        other => panic!("got {other:?}"),
+    }
+
+    // And the replay really did happen — otherwise this would be the
+    // pre-replay check firing and the test would prove nothing about
+    // the second one.
+    let after = std::fs::read(&path).unwrap();
+    assert_eq!(
+        &after[REGION_TABLE1_OFFSET as usize..REGION_TABLE1_OFFSET as usize + 4096],
+        &hostile_table[..4096],
+        "the chain was not applied, so this test did not reach the check it is about"
+    );
+    let _ = std::fs::remove_file(&path);
+}
