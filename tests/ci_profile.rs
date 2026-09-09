@@ -107,11 +107,54 @@ fn read_or_panic(path: &Path) -> String {
 fn command_lines(script: &str) -> Vec<&str> {
     script
         .lines()
-        .map(str::trim_start)
-        .filter(|line| !line.starts_with('#'))
-        .map(|line| line.split(" #").next().unwrap_or(line).trim())
+        .map(strip_shell_comment)
+        .map(str::trim)
         .filter(|line| !line.is_empty())
         .collect()
+}
+
+/// A line with its shell comment removed.
+///
+/// WHERE A COMMENT STARTS IS A TOKEN RULE, NOT A SPACE RULE. `#` opens
+/// a comment when it begins a word: at the start of the line, after
+/// whitespace of any kind, or after `;`, `&`, `|`, `(` or `)`. This was
+/// `line.split(" #")`, which requires a literal space, so
+///
+/// ```text
+/// cargo test --locked --lib;# EXPECT_OVERFLOW_CHECKS=1
+/// cargo test --locked --lib\t# EXPECT_OVERFLOW_CHECKS=1
+/// ```
+///
+/// both left the handshake visible to a reader of the line while the
+/// shell set nothing -- the same two-grammars defect the single
+/// [`command_lines`] was introduced to remove, one level down. The
+/// rewrite tokenised the command and then compared a token by exact
+/// string in a place where the shell does not: parsing was necessary
+/// and not sufficient.
+///
+/// Quoting still wins, so `echo "a # b"` carries no comment.
+fn strip_shell_comment(line: &str) -> &str {
+    let mut quote: Option<u8> = None;
+    let mut begins_a_word = true;
+    for (i, c) in line.bytes().enumerate() {
+        match quote {
+            Some(q) => {
+                if c == q {
+                    quote = None;
+                }
+            }
+            None => match c {
+                b'\'' | b'"' => {
+                    quote = Some(c);
+                    begins_a_word = false;
+                }
+                b'#' if begins_a_word => return &line[..i],
+                b' ' | b'\t' | b';' | b'&' | b'|' | b'(' | b')' => begins_a_word = true,
+                _ => begins_a_word = false,
+            },
+        }
+    }
+    line
 }
 
 /// Whether a line turns `set -e` off.
@@ -122,30 +165,45 @@ fn command_lines(script: &str) -> Vec<&str> {
 /// file exists to require. Recognised in all its spellings (`set +e`,
 /// `set +ex`, `set +o errexit`) rather than as a fixed string.
 fn disables_errexit(line: &str) -> bool {
-    let mut words = line.split_whitespace();
-    if words.next() != Some("set") {
-        return false;
-    }
-    let mut expecting_option_name = false;
-    for word in words {
-        if expecting_option_name {
-            if word == "errexit" {
-                return true;
+    // OVER THE PARSED COMMANDS, NOT `split_whitespace`. A `set` is a
+    // command like any other and `;` ends it, so whitespace
+    // tokenisation of `set +o errexit; cargo test ...` yields the word
+    // `errexit;`, which is not `errexit`, and the block counted as
+    // gating with `-e` off. `+e;` happened to survive the same
+    // treatment only because `"e;".contains('e')` is true -- one
+    // spelling accidentally right and its neighbour wrong is the tell
+    // that the tokenisation was the defect, not the comparison.
+    shell_commands(line).iter().any(|(words, _)| {
+        let mut words = words.iter().map(String::as_str);
+        if words.next() != Some("set") {
+            return false;
+        }
+        let mut expecting_option_name = false;
+        for word in words {
+            if expecting_option_name {
+                // An empty word is a quoted one -- `shell_commands`
+                // drops what is inside quotes -- so the option name
+                // cannot be read. `set +o "errexit"` is refused rather
+                // than assumed harmless: an unreadable disable is the
+                // one to treat as a disable.
+                if word == "errexit" || word.is_empty() {
+                    return true;
+                }
+                expecting_option_name = false;
+                continue;
             }
-            expecting_option_name = false;
-            continue;
-        }
-        if word == "+o" {
-            expecting_option_name = true;
-            continue;
-        }
-        if let Some(flags) = word.strip_prefix('+') {
-            if flags.contains('e') {
-                return true;
+            if word == "+o" {
+                expecting_option_name = true;
+                continue;
+            }
+            if let Some(flags) = word.strip_prefix('+') {
+                if flags.contains('e') {
+                    return true;
+                }
             }
         }
-    }
-    false
+        false
+    })
 }
 
 /// What follows a command on its line, and therefore whether the shell
@@ -1318,6 +1376,112 @@ cargo build --locked --release
         );
     }
 
+    /// A COMMENT DOES NOT NEED A SPACE IN FRONT OF IT.
+    ///
+    /// `#` opens a comment wherever a word begins, and the strip
+    /// required a literal space. So a run "documented" after a `;` or a
+    /// tab kept its text visible to every reader of the line while the
+    /// shell executed none of it.
+    #[test]
+    fn a_comment_opening_after_a_separator_or_a_tab_is_still_a_comment() {
+        // `;`, `&&` and `)` are the three that reached the guard,
+        // because each also SPLITS the line: the `#...` became its own
+        // command, so command one qualified while the handshake stayed
+        // visible in the raw text. A tab and a `|` were caught, but by
+        // the bare-word rule and by Sep::Pipe -- mechanisms with
+        // nothing to do with comments, which would stop covering them
+        // the moment either is loosened. All five are asserted here
+        // against the rule that actually governs them.
+        for line in [
+            "cargo test --locked --release;# cargo test --locked --lib",
+            "cargo test --locked --release && :;# cargo test --locked --lib",
+            "cargo test --locked --release&&# cargo test --locked --lib",
+            "(cargo test --locked --release)# cargo test --locked --lib",
+            "cargo test --locked --release |# cargo test --locked --lib",
+            "cargo test --locked --release\t# cargo test --locked --lib",
+            "# cargo test --locked --lib",
+            "   \t# cargo test --locked --lib",
+        ] {
+            assert_eq!(
+                runs_with_overflow_checks(line),
+                Vec::<String>::new(),
+                "{line:?} runs no debug suite; the text after # is a comment"
+            );
+        }
+    }
+
+    /// THE ACCEPTANCE HALF: a `#` that does not begin a word is not a
+    /// comment, and quoting still wins over everything.
+    #[test]
+    fn a_hash_inside_a_word_or_a_quoted_string_is_not_a_comment() {
+        for line in [
+            "cargo test --locked --all-targets",
+            "cargo test --locked --all-targets  # deliberately not --release",
+            "cargo test --locked --all-targets --features a#b",
+            "echo \"about to run # the suite\" && cargo test --locked --all-targets",
+        ] {
+            assert_eq!(
+                runs_with_overflow_checks(line).len(),
+                1,
+                "{line:?} really does run the suite in debug"
+            );
+        }
+    }
+
+    /// `set +o errexit` FOLLOWED BY A SEPARATOR IS STILL A DISABLE.
+    ///
+    /// `split_whitespace` on `set +o errexit; cargo test ...` yields the
+    /// word `errexit;`, which is not `errexit`, so the block counted as
+    /// gating with `-e` switched off. `+e;` survived the same
+    /// tokenisation only because `"e;".contains('e')` happens to be
+    /// true -- one spelling accidentally right beside one wrong is what
+    /// says the tokenisation was the defect.
+    #[test]
+    fn set_plus_o_errexit_is_recognised_whatever_follows_it() {
+        // BOTH SPELLINGS AGAINST EVERY SEPARATOR, because the two
+        // did not fail together. `set +e;` was already refused -- by
+        // accident, since `strip_prefix('+')` leaves `"e;"` and the
+        // test is `contains('e')` -- while `set +o errexit;` compared
+        // `==` and passed. One spelling accidentally right beside one
+        // wrong is what says the tokenisation was the defect.
+        for line in [
+            "set +o errexit; cargo test --locked --all-targets; echo done",
+            "set +o errexit&& cargo test --locked --all-targets",
+            "set +o errexit && cargo test --locked --all-targets",
+            "(set +o errexit); cargo test --locked --all-targets",
+            "set +e; cargo test --locked --all-targets",
+            "set +e&& cargo test --locked --all-targets",
+            "(set +e); cargo test --locked --all-targets",
+            "set +o errexit\ncargo test --locked --all-targets\n",
+            "set +e\ncargo test --locked --all-targets\n",
+            "set +o \"errexit\"; cargo test --locked --all-targets",
+        ] {
+            assert_eq!(
+                runs_with_overflow_checks(line),
+                Vec::<String>::new(),
+                "{line:?} turns off `set -e`, so nothing in it is a gate"
+            );
+        }
+    }
+
+    /// THE ACCEPTANCE HALF: turning errexit ON, or naming another
+    /// option, leaves the run counted.
+    #[test]
+    fn setting_errexit_or_another_option_does_not_disqualify_a_run() {
+        for line in [
+            "set -o errexit; cargo test --locked --all-targets",
+            "set -euo pipefail; cargo test --locked --all-targets",
+            "set +o pipefail; cargo test --locked --all-targets",
+            "set +u; cargo test --locked --all-targets",
+        ] {
+            assert_eq!(
+                runs_with_overflow_checks(line).len(),
+                1,
+                "{line:?} leaves `set -e` in force"
+            );
+        }
+    }
+
     /// A COMMAND WHOSE FAILURE IS DISCARDED IS NOT A GATE.
     ///
     /// Nothing here looked at status handling, so a debug run with its
@@ -1736,6 +1900,28 @@ mod gating {
                 gating_runs_that_prove_the_build_traps(&yaml).is_empty(),
                 "the variable is named in a comment, so the process never receives \
                  it and the runtime probe asserts nothing: {block:?}"
+            );
+        }
+    }
+
+    /// A HANDSHAKE AFTER A `;#` IS STILL IN A COMMENT.
+    ///
+    /// The end-to-end form of the comment rule: the strip wanted a
+    /// literal space, so this armed the step while the shell set
+    /// nothing.
+    #[test]
+    fn a_handshake_after_a_comment_that_follows_a_separator_does_not_arm_a_step() {
+        for block in [
+            "      - run: |\n          cargo test --locked --lib;# EXPECT_OVERFLOW_CHECKS=1\n",
+            "      - run: |\n          cargo test --locked --lib\t# EXPECT_OVERFLOW_CHECKS=1\n",
+        ] {
+            let yaml = GATING.replace(
+                "      - run: EXPECT_OVERFLOW_CHECKS=1 cargo test --locked --lib\n",
+                block,
+            );
+            assert!(
+                gating_runs_that_prove_the_build_traps(&yaml).is_empty(),
+                "the variable sits in a comment the shell never runs: {block:?}"
             );
         }
     }
