@@ -72,15 +72,29 @@ fn libraries_named(header: &str) -> Vec<String> {
 /// a C consumer reading the header knows what to link, and "mentioned
 /// somewhere" is not that.
 ///
-/// The rule is narrow on purpose: a line that says `Link with <want>`.
-/// It will not catch a header that says "do not link with <want>",
-/// which is self-contradictory content a reader has to fix; what it
-/// does catch is the absent instruction and the wrong one.
+/// THE INSTRUCTION MUST OPEN THE SENTENCE. After comment decoration
+/// (`*`, `/`, `#`) and leading space, the line has to begin `link with
+/// <want>`.
+///
+/// The first version of this searched for the phrase ANYWHERE on the
+/// line, and so accepted `Do not link with <want>` — a header telling
+/// a consumer explicitly not to link the library passed a test whose
+/// purpose is to confirm it says to link it. The failure message below
+/// already claimed that case was caught; the predicate did not
+/// implement it, which is this file's own defect shape one level in.
+///
+/// It stays a rule about how the sentence STARTS rather than a
+/// negation blacklist, because a blacklist is a list of the negations
+/// someone thought of. Refusing `To use this, link with <want>` is the
+/// price, and it fails loudly with the line quoted.
 fn states_the_link_instruction(header: &str, want: &str) -> bool {
     header.lines().any(|line| {
-        let l = line.to_ascii_lowercase();
-        match l.find("link with ") {
-            Some(i) => l[i + "link with ".len()..].trim_start().starts_with(want),
+        let lowered = line.to_ascii_lowercase();
+        let bare = lowered
+            .trim_start()
+            .trim_start_matches(['*', '/', '#', ' ']);
+        match bare.strip_prefix("link with ") {
+            Some(rest) => rest.trim_start().starts_with(want),
             None => false,
         }
     })
@@ -244,6 +258,53 @@ fn the_lib_name_comes_from_the_lib_section_and_not_the_package() {
     );
     // And a manifest with no [lib] section has no library name to give.
     assert_eq!(lib_name("[package]\nname = \"am-img-vhdx\"\n"), None);
+}
+
+/// AN INSTRUCTION, NOT A MENTION — AND NOT A NEGATION.
+///
+/// The rejection half is the filed defect: `Do not link with
+/// libvhdx.a` satisfied a check for "does the header say to link it".
+///
+/// The acceptance half is the one that gets forgotten. A stricter
+/// matcher that closed the negation gap by refusing the real header —
+/// or the same sentence behind `//`, `#`, or a closing `*/` — would be
+/// a worse guard than the gap it removed, so both directions are
+/// asserted here rather than only the one the issue named.
+#[test]
+fn the_link_instruction_must_open_the_sentence() {
+    let want = "libvhdx.a";
+
+    for accepted in [
+        " * Link with libvhdx.a alongside fs_core.h.\n",
+        "Link with libvhdx.a\n",
+        "// Link with libvhdx.a and include this header.\n",
+        "  # link with   libvhdx.a\n",
+        " */ Link with libvhdx.a\n",
+        " * unrelated first line\n * Link with libvhdx.a\n",
+    ] {
+        assert!(
+            states_the_link_instruction(accepted, want),
+            "{accepted:?} tells a consumer to link {want} and must be read as one"
+        );
+    }
+
+    for refused in [
+        // The filed defect.
+        " * Do not link with libvhdx.a; it is an implementation detail.\n",
+        " * You must never link with libvhdx.a directly.\n",
+        // A mention with no instruction: what #76's first fix caught.
+        " * The build produces libvhdx.a in the target directory.\n",
+        " * libvhdx.a was renamed in 0.4.0.\n",
+        // An instruction naming a different library.
+        " * Link with libfs_core.a.\n",
+        // Nothing at all.
+        "",
+    ] {
+        assert!(
+            !states_the_link_instruction(refused, want),
+            "{refused:?} does not tell a consumer to link {want}"
+        );
+    }
 }
 
 /// The header scan finds a library name wherever it sits in a line.
