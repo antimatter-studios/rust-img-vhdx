@@ -1378,34 +1378,50 @@ cargo build --locked --release
 
     /// A COMMENT DOES NOT NEED A SPACE IN FRONT OF IT.
     ///
-    /// `#` opens a comment wherever a word begins, and the strip
-    /// required a literal space. So a run "documented" after a `;` or a
-    /// tab kept its text visible to every reader of the line while the
-    /// shell executed none of it.
+    /// Asserted on `command_lines` rather than on
+    /// `runs_with_overflow_checks`, and the reason is the point of the
+    /// defect. An unstripped `#` makes the comment's first word the
+    /// command name, so the run scan returns nothing either way and a
+    /// test built on it would pass with the strip reverted. What leaked
+    /// was `step_declares_the_handshake`, which searches the LINE --
+    /// see `gating::a_handshake_after_a_comment_that_follows_a_separator_does_not_arm_a_step`
+    /// for that half. Between them the two halves of the shared
+    /// grammar are both witnessed.
+    ///
+    /// `;`, `&&` and `)` are the three that reached the guard. A tab
+    /// and a `|` did not, but only because the bare-word rule and
+    /// `Sep::Pipe` happened to catch them -- mechanisms with nothing to
+    /// do with comments, which stop covering these the moment either is
+    /// loosened. All of them are asserted here against the rule that
+    /// actually governs them.
     #[test]
     fn a_comment_opening_after_a_separator_or_a_tab_is_still_a_comment() {
-        // `;`, `&&` and `)` are the three that reached the guard,
-        // because each also SPLITS the line: the `#...` became its own
-        // command, so command one qualified while the handshake stayed
-        // visible in the raw text. A tab and a `|` were caught, but by
-        // the bare-word rule and by Sep::Pipe -- mechanisms with
-        // nothing to do with comments, which would stop covering them
-        // the moment either is loosened. All five are asserted here
-        // against the rule that actually governs them.
         for line in [
-            "cargo test --locked --release;# cargo test --locked --lib",
-            "cargo test --locked --release && :;# cargo test --locked --lib",
-            "cargo test --locked --release&&# cargo test --locked --lib",
-            "(cargo test --locked --release)# cargo test --locked --lib",
-            "cargo test --locked --release |# cargo test --locked --lib",
-            "cargo test --locked --release\t# cargo test --locked --lib",
+            "cargo test --locked --lib;# EXPECT_OVERFLOW_CHECKS=1",
+            "cargo test --locked --lib&&# EXPECT_OVERFLOW_CHECKS=1",
+            "cargo test --locked --lib && :;# EXPECT_OVERFLOW_CHECKS=1",
+            "(cargo test --locked --lib)# EXPECT_OVERFLOW_CHECKS=1",
+            "cargo test --locked --lib |# EXPECT_OVERFLOW_CHECKS=1",
+            "cargo test --locked --lib\t# EXPECT_OVERFLOW_CHECKS=1",
+            "cargo test --locked --lib # EXPECT_OVERFLOW_CHECKS=1",
+        ] {
+            let kept = super::command_lines(line);
+            assert_eq!(kept.len(), 1, "{line:?} is one command line");
+            assert!(
+                !kept[0].contains("EXPECT_OVERFLOW_CHECKS"),
+                "{line:?} -> {:?}: the text after # is a comment the shell \
+                 never runs, so no reader of this line may see it",
+                kept[0]
+            );
+        }
+
+        for line in [
             "# cargo test --locked --lib",
             "   \t# cargo test --locked --lib",
         ] {
-            assert_eq!(
-                runs_with_overflow_checks(line),
-                Vec::<String>::new(),
-                "{line:?} runs no debug suite; the text after # is a comment"
+            assert!(
+                super::command_lines(line).is_empty(),
+                "{line:?} is a comment and nothing else"
             );
         }
     }
@@ -1913,6 +1929,8 @@ mod gating {
     fn a_handshake_after_a_comment_that_follows_a_separator_does_not_arm_a_step() {
         for block in [
             "      - run: |\n          cargo test --locked --lib;# EXPECT_OVERFLOW_CHECKS=1\n",
+            "      - run: |\n          cargo test --locked --lib && :;# EXPECT_OVERFLOW_CHECKS=1\n",
+            "      - run: |\n          (cargo test --locked --lib)# EXPECT_OVERFLOW_CHECKS=1\n",
             "      - run: |\n          cargo test --locked --lib\t# EXPECT_OVERFLOW_CHECKS=1\n",
         ] {
             let yaml = GATING.replace(
