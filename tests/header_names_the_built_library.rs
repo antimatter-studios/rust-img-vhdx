@@ -400,3 +400,226 @@ fn the_header_scan_finds_library_names_in_prose() {
     // Words merely beginning with "lib" are not libraries.
     assert!(libraries_named(" * This library is liberally licensed.\n").is_empty());
 }
+
+// ---------------------------------------------------------------------
+// `sources:` names what the task reads
+// ---------------------------------------------------------------------
+
+/// A `staticlib` field, as a list of scalars. `sources` and `cmds` are
+/// both sequences of strings, so one reader serves both.
+///
+/// Parsed, not scanned, for the reason `chores_libname` is: the entries
+/// are quoted or bare at the author's discretion, comments sit between
+/// them, and a reader that matched lines would disagree with the tool
+/// that actually runs the task.
+fn staticlib_list(chores_yml: &str, field: &str) -> Vec<String> {
+    use saphyr::{LoadableYamlNode, Yaml};
+    let Ok(docs) = Yaml::load_from_str(chores_yml) else {
+        return Vec::new();
+    };
+    let Some(doc) = docs.first() else {
+        return Vec::new();
+    };
+    doc.as_mapping_get("tasks")
+        .and_then(|t| t.as_mapping_get("staticlib"))
+        .and_then(|t| t.as_mapping_get(field))
+        .and_then(Yaml::as_sequence)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|i| i.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The test targets the task actually runs: the argument after each
+/// `--test` in its command list.
+///
+/// By token rather than by regex, because `cargo test --locked --test x`
+/// and `cargo test --test x --locked` are the same command and a
+/// pattern anchored to the first spelling would read the second as
+/// running nothing — which is the empty answer this check must never
+/// mistake for a clean one.
+fn test_targets_run(chores_yml: &str) -> Vec<String> {
+    let mut targets = Vec::new();
+    for cmd in staticlib_list(chores_yml, "cmds") {
+        let mut words = cmd.split_whitespace();
+        while let Some(word) = words.next() {
+            if word == "--test" {
+                if let Some(name) = words.next() {
+                    targets.push(name.to_owned());
+                }
+            } else if let Some(name) = word.strip_prefix("--test=") {
+                targets.push(name.to_owned());
+            }
+        }
+    }
+    targets
+}
+
+/// The `tests/` entries of `sources:`, whatever quoting they carry.
+fn test_sources(chores_yml: &str) -> Vec<String> {
+    staticlib_list(chores_yml, "sources")
+        .into_iter()
+        .filter(|s| s.starts_with("tests/"))
+        .collect()
+}
+
+/// SOURCES NAMES WHAT THE TASK READS, IN BOTH DIRECTIONS.
+///
+/// Each direction is a defect this repository has actually had, and
+/// they pull opposite ways — which is why one check has to refuse both
+/// rather than two checks each refusing one.
+///
+/// TOO NARROW is `#79`: with no `tests/` entry at all, editing the
+/// guard left the task up to date and the guard did not run. Measured —
+/// force its body to `false`, change nothing else, and `chore staticlib`
+/// prints "task: staticlib is up to date" and executes nothing. A check
+/// in the step that decides what ships, whose result nothing re-reads.
+///
+/// TOO WIDE is `#85`: `tests/**/*.rs` matched six files while `cmds:`
+/// ran one target, so editing `synthetic.rs` or `corruption.rs`
+/// re-ran the whole task including the cross-target release build. That
+/// one cannot ship a stale artefact — it errs toward rebuilding — so it
+/// costs time and nothing else, and the tempting over-correction for it
+/// is `#79` again.
+#[test]
+fn the_staticlib_task_fingerprints_the_tests_it_runs_and_no_others() {
+    let chores = read("chores.yml");
+    let run = test_targets_run(&chores);
+    let sources = test_sources(&chores);
+
+    // The task runs a test at all. Without this the two comparisons
+    // below are between empty lists and agree vacuously -- which is what
+    // a `cmds:` block that lost its `cargo test` line would look like.
+    assert!(
+        !run.is_empty(),
+        "the staticlib task runs no `--test` target at all. The header guard is that \
+         target, and it runs FIRST so a naming mistake costs no release build. Read \
+         cmds: {:?}",
+        staticlib_list(&chores, "cmds")
+    );
+
+    // A GLOB IS THE TOO-WIDE CASE BY CONSTRUCTION, and it is checked
+    // first so it is reported as itself. It matches whatever the
+    // directory happens to hold, so it does cover the guard -- which
+    // means the "is the guard fingerprinted" check below would pass
+    // over it, and the failure would be reported as #79 when it is #85.
+    // A message that names the wrong defect is worse here than no
+    // message: this file is copied into four sibling repositories.
+    for have in &sources {
+        assert!(
+            !have.contains('*'),
+            "chores.yml fingerprints {have} under staticlib's sources:. That is a \
+             glob over a directory, and the task opens one file in it, so editing an \
+             unrelated test re-runs the whole task including the cross-target release \
+             build. That is #85. Name the file instead: the task runs {run:?}"
+        );
+    }
+
+    let wanted: Vec<String> = run.iter().map(|t| format!("tests/{t}.rs")).collect();
+    for want in &wanted {
+        assert!(
+            sources.contains(want),
+            "chores.yml runs {want} in staticlib but does not list it under sources:, \
+             so editing it leaves the task up to date and the guard does not run. \
+             That is #79. sources: names {sources:?}"
+        );
+    }
+    for have in &sources {
+        assert!(
+            wanted.contains(have),
+            "chores.yml fingerprints {have} under staticlib's sources: and the task \
+             never opens it, so editing an unrelated test re-runs the cross-target \
+             release build. That is #85. The task runs {run:?}"
+        );
+    }
+}
+
+/// The too-wide direction, on a manifest rather than on the tree: the
+/// glob this repository shipped.
+#[test]
+fn a_tests_glob_fingerprints_files_the_task_never_opens() {
+    let chores = concat!(
+        "tasks:\n  staticlib:\n",
+        "    sources:\n      - 'tests/**/*.rs'\n",
+        "    cmds:\n      - 'cargo test --locked --test header_names_the_built_library'\n",
+    );
+    assert_eq!(
+        test_targets_run(chores),
+        vec!["header_names_the_built_library"],
+        "one target is run"
+    );
+    let sources = test_sources(chores);
+    assert_eq!(sources, vec!["tests/**/*.rs"], "the glob is read as itself");
+    assert!(
+        sources[0].contains('*'),
+        "and it is recognised AS a glob, which is what makes the failure report #85 \
+         rather than #79 -- a glob does cover the guard's own file, so the \
+         is-the-guard-fingerprinted check would pass over it"
+    );
+}
+
+/// The too-narrow direction: no `tests/` entry, so nothing pins the
+/// guard's own file.
+#[test]
+fn a_sources_list_with_no_test_file_pins_the_guard_to_nothing() {
+    let chores = concat!(
+        "tasks:\n  staticlib:\n",
+        "    sources:\n      - Cargo.toml\n      - chores.yml\n",
+        "    cmds:\n      - 'cargo test --locked --test header_names_the_built_library'\n",
+    );
+    assert!(
+        test_sources(chores).is_empty(),
+        "nothing under tests/ is fingerprinted"
+    );
+    assert_eq!(
+        test_targets_run(chores),
+        vec!["header_names_the_built_library"]
+    );
+}
+
+/// The acceptance half, and the one that stops the reader being the
+/// defect: a command list this check must read correctly however the
+/// flags are ordered or spelled, and a second target being legal.
+#[test]
+fn the_target_is_read_from_the_command_however_it_is_spelled() {
+    for (what, cmds) in [
+        (
+            "the flag last",
+            "      - 'cargo test --locked --test header_names_the_built_library'\n",
+        ),
+        (
+            "the flag first",
+            "      - 'cargo test --test header_names_the_built_library --locked'\n",
+        ),
+        (
+            "an equals sign",
+            "      - 'cargo test --locked --test=header_names_the_built_library'\n",
+        ),
+    ] {
+        let chores = format!("tasks:\n  staticlib:\n    cmds:\n{cmds}");
+        assert_eq!(
+            test_targets_run(&chores),
+            vec!["header_names_the_built_library"],
+            "{what} is the same command and cargo runs it either way"
+        );
+    }
+
+    // Two targets is a legal task, and then both files belong in
+    // sources:. The check is a correspondence, not a count.
+    let chores = concat!(
+        "tasks:\n  staticlib:\n",
+        "    sources:\n      - 'tests/one.rs'\n      - 'tests/two.rs'\n",
+        "    cmds:\n      - 'cargo test --test one'\n      - 'cargo test --test two'\n",
+    );
+    let run = test_targets_run(chores);
+    assert_eq!(run, vec!["one", "two"]);
+    assert_eq!(test_sources(chores), vec!["tests/one.rs", "tests/two.rs"]);
+
+    // A command that runs no test contributes no target, rather than
+    // contributing an empty one.
+    let chores = "tasks:\n  staticlib:\n    cmds:\n      - 'cargo build --release'\n      - 'rustup target add x'\n";
+    assert!(test_targets_run(chores).is_empty());
+}
