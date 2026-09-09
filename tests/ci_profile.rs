@@ -158,7 +158,10 @@ enum Sep {
     And,
     /// `||`: the failure is caught and discarded.
     Or,
-    /// `;`: the line's status becomes the NEXT command's.
+    /// `;`: under `bash -e` a failure still ends the step, because
+    /// `-e` aborts before the next command runs. MEASURED, not
+    /// reasoned: `bash -e -c 'false; echo REACHED'` prints nothing and
+    /// exits 1.
     Semi,
     /// `|`: the line's status becomes the LAST command's. Actions'
     /// default `bash -e` does not set `pipefail`.
@@ -411,17 +414,44 @@ fn omits_the_library_unit_tests(arguments: &[&str]) -> bool {
 /// Nothing here used to look at status handling at all, so
 /// `cargo test --locked --all-targets || true` was matched, counted as
 /// gating, and gated nothing: the job goes green with the probe
-/// failing. `; true`, a pipe (Actions' default `bash -e` sets no
-/// `pipefail`, so the line's status is the last stage's) and `&` are
-/// the same edit in other spellings.
+/// failing. A pipe and a trailing `&` are the same edit in other
+/// spellings.
 ///
 /// This file already enumerates two levels of the same defect -- a
 /// step's `if:` and `continue-on-error:`, and a job's. Suppression
 /// inside the command is the third, and it was not on the list.
+///
+/// WHICH SEPARATORS DISCARD A STATUS IS MEASURED, NOT REASONED.
+/// Actions runs a `run:` block as `bash -e` with no `pipefail`, and
+/// under that shell:
+///
+/// ```text
+/// bash -e -c 'false; echo REACHED'  prints nothing, exit 1  READ
+/// bash -e -c 'false && echo x'                     exit 1   READ
+/// bash -e -c 'false || true'                       exit 0   discarded
+/// bash -e -c 'false | cat'                         exit 0   discarded
+/// bash -e -c 'false &'                             exit 0   discarded
+/// bash -e -c 'set +e; false; echo REACHED'  prints, exit 0  discarded
+/// ```
+///
+/// So `;` belongs with `&&`. The first version of this rule refused
+/// it, reasoning that the line's status becomes the next command's --
+/// true without `-e`, false with it, and the sort of claim that has to
+/// be run rather than thought about.
+///
+/// `set +e` is the caller's to handle, because it disqualifies the
+/// whole block rather than one line.
+///
+/// It stays STRICTER than bash in one place: `cargo test … & wait $!`
+/// does propagate the failure (measured: exit 1) and is refused
+/// anyway, because recognising it means tracking which job `$!` names.
+/// Refusing a correct workflow loudly is this file's declared
+/// direction; passing a broken one silently is the defect it exists
+/// for.
 fn status_is_read(commands: &[(Vec<String>, Sep)], index: usize) -> bool {
     commands[index..]
         .iter()
-        .all(|(_, sep)| matches!(sep, Sep::End | Sep::And))
+        .all(|(_, sep)| matches!(sep, Sep::End | Sep::And | Sep::Semi))
 }
 
 /// Every `cargo test` invocation in a shell script that would be
@@ -1305,7 +1335,6 @@ cargo build --locked --release
         for line in [
             "cargo test --locked --all-targets || true",
             "cargo test --locked --all-targets || echo 'ignored'",
-            "cargo test --locked --all-targets; true",
             "cargo test --locked --all-targets | tee test.log",
             "cargo test --locked --all-targets &",
             "set +e\ncargo test --locked --all-targets\n",
@@ -1333,6 +1362,11 @@ cargo build --locked --release
             "cargo test --locked --all-targets && echo ok",
             "cd .. && cargo test --locked --all-targets && echo ok",
             "cargo test --locked --all-targets 2>&1",
+            // `;` is NOT a discard under `bash -e`: the shell aborts
+            // before the next command runs. Measured, and the reason
+            // the first version of this rule was wrong.
+            "cargo test --locked --all-targets; echo done",
+            "cargo test --locked --all-targets ; true",
             "set -euo pipefail\ncargo test --locked --all-targets\n",
         ] {
             assert_eq!(
