@@ -2,7 +2,12 @@
  * am-img-vhdx C ABI — opens a VHDX (Microsoft VHD-successor) image
  * and returns a generic FsCoreDevice handle.
  *
- * Link with libam_img_vhdx.a alongside fs_core.h.
+ * Link with libvhdx.a alongside fs_core.h.
+ *
+ * `chore staticlib` builds that library and copies both headers beside
+ * it; `chore artifact` prints the absolute path of the directory
+ * holding them. That contract lives in chores.yml, which is not
+ * anywhere a C consumer would look, so it is repeated here.
  *
  * MIT license. (c) 2026 Antimatter Studios.
  */
