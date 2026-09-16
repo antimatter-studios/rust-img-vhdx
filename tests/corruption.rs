@@ -885,6 +885,77 @@ fn a_bat_region_too_short_for_the_disk_is_refused_at_open() {
     let _ = std::fs::remove_file(&path);
 }
 
+/// A BAT region far longer than the disk needs is read no further than
+/// the disk needs (#67).
+///
+/// The region's declared length sized the allocation, and nothing bounded
+/// it but the file's apparent length -- which a sparse file sets for free.
+/// Measured on this fixture with a 4 GiB declaration before the fix: 4 GiB
+/// of bytes and 8 GiB of entries allocated from an 8 MiB file, and the
+/// open succeeded. The test declares 64 MiB so that the unfixed path is a
+/// failure rather than an exhausted machine, and records the size of the
+/// read at the BAT's offset.
+///
+/// Oversized is not refused: qemu-img opens a 4 MiB disk with a 64 MiB BAT
+/// region, so the image is legal and only the allocation was the bug.
+#[test]
+fn a_bat_region_longer_than_the_disk_needs_is_not_read_past_the_disk() {
+    struct RecordingReads {
+        inner: fs_core::FileDevice,
+        reads: std::sync::Mutex<Vec<(u64, usize)>>,
+    }
+    impl fs_core::BlockRead for RecordingReads {
+        fn read_at(&self, offset: u64, buf: &mut [u8]) -> fs_core::Result<()> {
+            self.reads.lock().unwrap().push((offset, buf.len()));
+            self.inner.read_at(offset, buf)
+        }
+        fn size_bytes(&self) -> u64 {
+            fs_core::BlockRead::size_bytes(&self.inner)
+        }
+    }
+    impl fs_core::BlockDevice for RecordingReads {}
+
+    let path = tmp_path("bat_region_oversized");
+    build_big_vhdx(&path, &pattern_block(3));
+    let declared: u32 = 64 * 1024 * 1024;
+    declare_bat_region_length(&path, declared);
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_len(BIG_BAT_OFFSET + u64::from(declared))
+        .unwrap();
+
+    let dev = std::sync::Arc::new(RecordingReads {
+        inner: fs_core::FileDevice::open(&path).unwrap(),
+        reads: std::sync::Mutex::new(Vec::new()),
+    });
+    let r = VhdxReader::open_on_device(dev.clone()).expect("an oversized BAT region is legal");
+    let bat_reads: Vec<usize> = dev
+        .reads
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(off, _)| *off == BIG_BAT_OFFSET)
+        .map(|&(_, len)| len)
+        .collect();
+    assert_eq!(
+        bat_reads,
+        vec![(BIG_BAT_ENTRIES * 8) as usize],
+        "the BAT was read at its declared {declared} bytes rather than the {} the disk needs",
+        BIG_BAT_ENTRIES * 8
+    );
+    let mut buf = [0u8; 16];
+    r.read_at(1, &mut buf).unwrap();
+    assert_eq!(
+        &buf[..],
+        &pattern_block(3)[1..17],
+        "block 0 did not read back"
+    );
+    drop(r);
+    let _ = std::fs::remove_file(&path);
+}
+
 /// Exactly enough is enough.
 ///
 /// The bound needs both ends: a check written one entry too strict

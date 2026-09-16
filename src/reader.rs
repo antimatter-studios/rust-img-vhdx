@@ -574,21 +574,33 @@ impl VhdxReader {
         // `u32::MAX` bytes is past the end of every real file, and
         // saying so is more use than telling its author that
         // 4,294,967,295 is not a multiple of eight.
-        let mut bat_bytes = vec![
-            0u8;
-            span_inside_the_file(
-                dev_size,
-                bat_region.file_offset,
-                u64::from(bat_region.length),
-                "BAT region reaches past the end of the file",
-            )?
-        ];
-        bat_region_covers_the_disk(
+        span_inside_the_file(
+            dev_size,
+            bat_region.file_offset,
+            u64::from(bat_region.length),
+            "BAT region reaches past the end of the file",
+        )?;
+        let entries = bat_region_covers_the_disk(
             bat_region.length,
             virtual_size,
             file_params.block_size,
             chunk_ratio,
         )?;
+        // THE ENTRIES THE DISK NEEDS, NOT THE BYTES THE REGION DECLARES
+        // (#67). The region's length is a number off the image, bounded
+        // only by the file's apparent size, which a sparse file sets for
+        // free: a 4 MiB disk declaring a 4 GiB region allocated 4 GiB of
+        // bytes and 8 GiB of entries, then opened. A region longer than
+        // the disk needs is not malformed -- qemu-img opens a 4 MiB disk
+        // with a 64 MiB BAT region -- so it is not refused; the entries
+        // past the last one a read can ask for are simply never loaded.
+        let bat_len = entries
+            .checked_mul(BAT_ENTRY_SIZE)
+            .and_then(|n| usize::try_from(n).ok())
+            .ok_or(Error::Corrupt(
+                "the BAT is larger than this platform can hold",
+            ))?;
+        let mut bat_bytes = vec![0u8; bat_len];
         dev.read_at(bat_region.file_offset, &mut bat_bytes)
             .map_err(fs_core_to_vhdx_error)?;
         let mut bat = Vec::with_capacity(bat_bytes.len() / 8);
@@ -1261,19 +1273,23 @@ fn rewrite_header_clear_log(
 /// entry, so a region declaring 8N+4 bytes loaded as N entries and the
 /// four bytes went unexamined — a declaration nobody wrote on purpose,
 /// and the kind of near-miss that is worth hearing about.
+///
+/// Returns how many entries the disk needs, which is what the caller
+/// loads: never more than the region holds, and never more than the
+/// disk's own geometry calls for.
 fn bat_region_covers_the_disk(
     region_len: u32,
     virtual_size: u64,
     block_size: u32,
     chunk_ratio: u64,
-) -> Result<()> {
+) -> Result<u64> {
     if !u64::from(region_len).is_multiple_of(BAT_ENTRY_SIZE) {
         return Err(Error::Corrupt(
             "the BAT region's length is not a whole number of 8-byte entries",
         ));
     }
     if virtual_size == 0 {
-        return Ok(());
+        return Ok(0);
     }
     let last_block = virtual_size.div_ceil(u64::from(block_size)) - 1;
     let highest_index = crate::bat::data_bat_index(last_block, chunk_ratio);
@@ -1286,7 +1302,7 @@ fn bat_region_covers_the_disk(
             "the BAT region is too short for the disk it describes",
         ));
     }
-    Ok(())
+    Ok(required_entries)
 }
 
 /// Bytes per BAT entry.
