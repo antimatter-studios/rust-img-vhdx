@@ -43,9 +43,10 @@
 //!
 //! - No differencing-chain resolution (parent VHDX). Surfaced as
 //!   `Error::Unsupported`.
-//! - No sector-bitmap (PARTIALLY_PRESENT) support on read; treated as
-//!   `Unsupported`. Writes into a sector-bitmap-only entry are
-//!   converted into a fully-present block (allocate + write) per spec.
+//! - No sector-bitmap (PARTIALLY_PRESENT) support. Reads and writes
+//!   touching such a block both return `Error::Unsupported`: a fresh
+//!   block published over it would discard every sector the bitmap
+//!   calls valid.
 
 use crate::bat::{chunk_ratio as compute_chunk_ratio, data_bat_index, BatEntry, PayloadState};
 use crate::error::{Error, Result};
@@ -784,18 +785,24 @@ impl VhdxReader {
     ///   fresh host block at the device tail, zero-init it, write the
     ///   user payload at the in-block offset, journal the BAT mutation
     ///   through the log, then publish the BAT entry on disk.
-    /// - `PartiallyPresent`: same allocate-and-write path as
-    ///   unallocated — we promote to FullyPresent rather than honour
-    ///   the sector bitmap. The original sector-bitmap entry is left
-    ///   alone; subsequent reads come from the new fully-present block.
+    /// - `PartiallyPresent`: refused with `Error::Unsupported`. The
+    ///   sector bitmap is not walked, and publishing a fresh block over
+    ///   it would discard every sector the bitmap calls valid.
     ///
-    /// Crash-safety: every BAT mutation is committed to the log first
-    /// (with `dev.flush()` after the log write), then the BAT entry is
-    /// rewritten in place, then the header is bumped to a fresh
-    /// sequence_number with `file_write_guid` invalidated. A crash
-    /// after the log commit but before the header bump is recovered on
-    /// the next open by replaying the log; a crash before the log
-    /// commit loses only the in-flight write.
+    /// Crash-safety, where the BAT mutation is journalled: it is
+    /// committed to the log first (with `dev.flush()` after the log
+    /// write), then the BAT entry is rewritten in place, then the header
+    /// is bumped to a fresh sequence_number with `file_write_guid`
+    /// invalidated. A crash after the log commit but before the header
+    /// bump is recovered on the next open by replaying the log; a crash
+    /// before the log commit loses only the in-flight write.
+    ///
+    /// Not every mutation is journalled: `journal_sector_write` returns
+    /// `Ok(())` without writing a log entry when the log region is absent
+    /// or too small for one entry, or the entry is larger than the
+    /// region, and the BAT entry is published regardless. Nor does the
+    /// log describe a whole multi-block write afterwards: each
+    /// allocation journals separately into the same region (#45).
     pub fn write_at(&self, offset: u64, buf: &[u8]) -> Result<()> {
         if !self.writable {
             return Err(Error::ReadOnly);
