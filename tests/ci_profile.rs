@@ -872,6 +872,16 @@ fn status_is_read(
 /// A `cargo build` is not a `cargo test` and is not considered, nor is
 /// any step that invokes no cargo at all.
 fn runs_with_overflow_checks(script: &str) -> Vec<String> {
+    qualifying_runs(script)
+        .into_iter()
+        .map(|(line, _)| line)
+        .collect()
+}
+
+/// [`runs_with_overflow_checks`], keeping the words of the `cargo test`
+/// command that qualified each line -- the one command a `NAME=value`
+/// prefix has to be on to reach it. See [`prefixes_the_handshake`].
+fn qualifying_runs(script: &str) -> Vec<(String, Vec<String>)> {
     let lines = command_lines(script);
     if lines.iter().any(|line| disables_errexit(line)) {
         return Vec::new();
@@ -898,7 +908,7 @@ fn runs_with_overflow_checks(script: &str) -> Vec<String> {
             if !status_is_read(&commands, index, line_index == last_line) {
                 continue;
             }
-            out.push(line.to_string());
+            out.push((line.to_string(), words.clone()));
             break;
         }
     }
@@ -1247,11 +1257,20 @@ fn scan_steps(workflow: &str, gating: bool, select: fn(&str) -> Vec<String>) -> 
 /// received nothing. The defect was never the grammar -- it was asking
 /// whether the CHARACTERS are present instead of whether the shell
 /// puts the variable in an environment. See [`assigns_the_handshake`].
+///
+/// A PREFIX DOES NOT ARM A STEP. This asked [`assigns_the_handshake`]
+/// of every command, and a `NAME=value` prefix reaches only the command
+/// it prefixes, so `EXPECT_OVERFLOW_CHECKS=1 echo x; cargo test …`
+/// armed the step while the `cargo test` received nothing -- measured,
+/// `bash -c 'EXPECT_OVERFLOW_CHECKS=1 true && env'` shows it 0 times.
+/// Only an export or the `env:` mapping reaches the whole step; a
+/// prefix is judged on the run it prefixes, by
+/// [`debug_runs_that_prove_the_build_traps`].
 fn step_declares_the_handshake(step: &Step) -> bool {
     command_lines(&step.run).iter().any(|line| {
         shell_commands(line)
             .iter()
-            .any(|(words, _)| assigns_the_handshake(words))
+            .any(|(words, _)| exports_the_handshake(words))
     }) || step.env.iter().any(|entry| entry == HANDSHAKE)
 }
 
@@ -1286,6 +1305,12 @@ const HANDSHAKE: &str = "EXPECT_OVERFLOW_CHECKS=1";
 /// which is this file's declared direction, and the `env:` mapping is
 /// there for anyone who hits it.
 fn assigns_the_handshake(words: &[String]) -> bool {
+    exports_the_handshake(words) || prefixes_the_handshake(words)
+}
+
+/// Spelling 2 of [`assigns_the_handshake`]: a builtin that exports, and
+/// so reaches every later command in the step.
+fn exports_the_handshake(words: &[String]) -> bool {
     let mut words = words.iter().map(String::as_str).peekable();
     if let Some(first) = words.peek() {
         // ONLY THE BUILTINS THAT ACTUALLY EXPORT. This list was
@@ -1316,6 +1341,13 @@ fn assigns_the_handshake(words: &[String]) -> bool {
             return words.any(|word| word == HANDSHAKE);
         }
     }
+    false
+}
+
+/// Spelling 1 of [`assigns_the_handshake`]: a `NAME=value` prefix,
+/// which reaches the command it prefixes and nothing else.
+fn prefixes_the_handshake(words: &[String]) -> bool {
+    let words = words.iter().map(String::as_str);
     // A PREFIX ASSIGNMENT IS EXPORTED TO THE COMMAND IT PREFIXES, AND
     // TO NOTHING ELSE.
     //
@@ -1400,8 +1432,13 @@ fn gating_runs_with_overflow_checks(workflow: &str) -> Vec<String> {
 fn gating_runs_that_prove_the_build_traps(workflow: &str) -> Vec<String> {
     collect_steps(workflow, true)
         .into_iter()
-        .filter(step_declares_the_handshake)
-        .flat_map(|step| runs_with_overflow_checks(&step.run))
+        .flat_map(|step| {
+            if step_declares_the_handshake(&step) {
+                runs_with_overflow_checks(&step.run)
+            } else {
+                debug_runs_that_prove_the_build_traps(&step.run)
+            }
+        })
         .collect()
 }
 
@@ -1422,14 +1459,21 @@ fn gating_runs_that_prove_the_build_traps(workflow: &str) -> Vec<String> {
 /// call sites shared the substring bug and had to be fixed together.
 /// `echo "EXPECT_OVERFLOW_CHECKS=1" && cargo test --locked --lib` is a
 /// real gating debug run with the handshake nowhere in its environment.
+///
+/// A prefix counts only on the `cargo test` it prefixes:
+/// `EXPECT_OVERFLOW_CHECKS=1 true && cargo test --locked --lib` hands
+/// the run nothing, and asking whether ANY command on the line assigned
+/// it said yes. An export on the line still counts.
 fn debug_runs_that_prove_the_build_traps(script: &str) -> Vec<String> {
-    runs_with_overflow_checks(script)
+    qualifying_runs(script)
         .into_iter()
-        .filter(|command| {
-            shell_commands(command)
-                .iter()
-                .any(|(words, _)| assigns_the_handshake(words))
+        .filter(|(line, run)| {
+            prefixes_the_handshake(run)
+                || shell_commands(line)
+                    .iter()
+                    .any(|(words, _)| exports_the_handshake(words))
         })
+        .map(|(line, _)| line)
         .collect()
 }
 
@@ -2536,6 +2580,44 @@ mod handshake {
             "printing the variable does not put it in the run's environment"
         );
     }
+
+    /// AND PREFIXED TO A DIFFERENT COMMAND ON THE SAME LINE.
+    ///
+    /// The script-level twin of
+    /// `gating::a_prefix_on_another_command_does_not_arm_the_step`: this
+    /// path asked whether any command on the line assigned the
+    /// handshake, so a prefix on `true` counted for the `cargo test`
+    /// after it. Measured: `bash -c 'EXPECT_OVERFLOW_CHECKS=1 true &&
+    /// env'` shows the handshake 0 times.
+    #[test]
+    fn the_handshake_prefixed_to_another_command_does_not_count() {
+        let counted: Vec<&str> = [
+            "EXPECT_OVERFLOW_CHECKS=1 echo x; cargo test --locked --lib\n",
+            "EXPECT_OVERFLOW_CHECKS=1 true && cargo test --locked --lib\n",
+        ]
+        .into_iter()
+        .filter(|script| {
+            assert_eq!(
+                runs_with_overflow_checks(script).len(),
+                1,
+                "the control: this line really does run the suite: {script:?}"
+            );
+            !debug_runs_that_prove_the_build_traps(script).is_empty()
+        })
+        .collect();
+        assert_eq!(
+            counted,
+            Vec::<&str>::new(),
+            "the prefix is on a different command, so the cargo test runs without it"
+        );
+
+        let exported = "export EXPECT_OVERFLOW_CHECKS=1; cargo test --locked --lib\n";
+        assert_eq!(
+            debug_runs_that_prove_the_build_traps(exported).len(),
+            1,
+            "an export reaches the cargo test after it"
+        );
+    }
 }
 
 /// The manifest scanner, held to the shapes it has to tell apart. These
@@ -2877,6 +2959,52 @@ mod gating {
             super::gating_runs_that_prove_the_build_traps(prefix).len(),
             1,
             "a prefix assignment is exported to the command it prefixes"
+        );
+    }
+
+    /// A PREFIX ON ANOTHER COMMAND DOES NOT ARM THE STEP.
+    ///
+    /// `step_declares_the_handshake` armed a step when ANY command in it
+    /// assigned the handshake. That is right for `export`, which
+    /// persists, and wrong for a `NAME=value` prefix, which reaches only
+    /// the command it prefixes. Measured with `bash -c '<fixture with
+    /// env for cargo test>'`, counting the handshake in the child's
+    /// environment: all three are 0; `export …; env` is 1.
+    ///
+    /// Every fixture is checked before asserting, so each one is
+    /// measured rather than only the first.
+    #[test]
+    fn a_prefix_on_another_command_does_not_arm_the_step() {
+        let armed: Vec<&str> = [
+            "      - run: EXPECT_OVERFLOW_CHECKS=1 echo x; cargo test --locked --lib\n",
+            "      - run: |\n          EXPECT_OVERFLOW_CHECKS=1 echo x\n          cargo test --locked --lib\n",
+            "      - run: EXPECT_OVERFLOW_CHECKS=1 true && cargo test --locked --lib\n",
+        ]
+        .into_iter()
+        .filter(|block| {
+            let yaml = GATING.replace(
+                "      - run: EXPECT_OVERFLOW_CHECKS=1 cargo test --locked --lib\n",
+                block,
+            );
+            assert_ne!(yaml, GATING, "the fixture must replace the control step");
+            !gating_runs_that_prove_the_build_traps(&yaml).is_empty()
+        })
+        .collect();
+        assert_eq!(
+            armed,
+            Vec::<&str>::new(),
+            "the prefix is on a different command, so the cargo test runs without it"
+        );
+
+        // ACCEPTANCE: an export on the same line does persist.
+        let yaml = GATING.replace(
+            "      - run: EXPECT_OVERFLOW_CHECKS=1 cargo test --locked --lib\n",
+            "      - run: export EXPECT_OVERFLOW_CHECKS=1; cargo test --locked --lib\n",
+        );
+        assert_eq!(
+            gating_runs_that_prove_the_build_traps(&yaml).len(),
+            1,
+            "an export reaches every later command"
         );
     }
 
