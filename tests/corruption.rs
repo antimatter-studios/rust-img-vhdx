@@ -987,3 +987,120 @@ fn the_leave_blocks_allocated_flag_is_not_a_parent() {
     drop(r);
     let _ = std::fs::remove_file(&path);
 }
+
+// ---------------------------------------------------------------------------
+// Metadata items marked IsRequired
+// ---------------------------------------------------------------------------
+
+/// Metadata entry flag bit 2: the item must be understood to read the
+/// file.
+const METADATA_IS_REQUIRED: u32 = 0x4;
+
+/// ParentLocator: A8D35F2D-B30B-454D-ABF7-D3D84834AB0C, on-disk form.
+/// Every differencing image carries it, marked required.
+const PARENT_LOCATOR_ID: [u8; 16] = [
+    0x2D, 0x5F, 0xD3, 0xA8, 0x0B, 0xB3, 0x4D, 0x45, 0xAB, 0xF7, 0xD3, 0xD8, 0x48, 0x34, 0xAB, 0x0C,
+];
+
+/// Append a metadata entry to the synthetic image's metadata table,
+/// pointing at the last entry's item data so the table stays in bounds.
+/// The metadata table carries no checksum, so nothing else needs repair.
+fn add_metadata_item(path: &std::path::Path, item_id: [u8; 16], flags: u32) {
+    let mut table = vec![0u8; 32 * 8];
+    {
+        use std::io::Read;
+        let mut f = open_file_rw(path);
+        f.seek(SeekFrom::Start(METADATA_REGION_OFFSET)).unwrap();
+        f.read_exact(&mut table).unwrap();
+    }
+    assert_eq!(&table[0..8], b"metadata", "not the metadata table");
+    let count = u16::from_le_bytes([table[10], table[11]]) as usize;
+    let last = 32 + (count - 1) * 32;
+    assert!(
+        32 + (count as u64 + 1) * 32 <= METADATA_ITEMS_START,
+        "no room for another entry before the item data"
+    );
+    let mut entry = [0u8; 32];
+    entry[0..16].copy_from_slice(&item_id);
+    entry[16..24].copy_from_slice(&table[last + 16..last + 24]);
+    entry[24..28].copy_from_slice(&flags.to_le_bytes());
+    patch(
+        path,
+        METADATA_REGION_OFFSET + 32 + (count * 32) as u64,
+        &entry,
+    );
+    patch(
+        path,
+        METADATA_REGION_OFFSET + 10,
+        &((count + 1) as u16).to_le_bytes(),
+    );
+}
+
+/// A metadata item this crate does not recognise, marked required, is
+/// refused at open (#44).
+///
+/// The flags word was parsed onto `MetadataEntry` and read by nothing,
+/// so the file opened and read as though the item were not there.
+/// `qemu-img` refuses the same file -- see
+/// `an_unknown_required_metadata_item_is_refused_like_qemu_refuses_it`
+/// in `tests/qemu_validation.rs`, which runs on qemu's own image.
+#[test]
+fn an_unknown_required_metadata_item_is_refused_at_open() {
+    let path = tmp_path("metadata_required_unknown");
+    build_vhdx(&path, &ramp_block());
+    VhdxReader::open(&path).expect("the unpatched image must open");
+    add_metadata_item(&path, [0xFF; 16], 0x2 | METADATA_IS_REQUIRED);
+
+    let result = VhdxReader::open(&path);
+    let _ = std::fs::remove_file(&path);
+    match result {
+        Err(Error::Unsupported(m)) => assert!(
+            m.contains("metadata item"),
+            "refused, but not for the metadata item: {m}"
+        ),
+        Ok(_) => panic!("an unrecognised required metadata item was ignored"),
+        Err(e) => panic!("an unrecognised required metadata item gave {e:?}"),
+    }
+}
+
+/// The same item with the flag clear is the format saying "ignore me if
+/// you do not know me": the image opens and reads. This is what makes
+/// the check a gate rather than a refusal of every unknown item.
+#[test]
+fn an_unknown_optional_metadata_item_is_ignored() {
+    let path = tmp_path("metadata_optional_unknown");
+    let data = ramp_block();
+    build_vhdx(&path, &data);
+    add_metadata_item(&path, [0xFF; 16], 0x2);
+
+    let r = VhdxReader::open(&path).expect("an unknown optional item must be ignored");
+    let mut buf = [0u8; 64];
+    r.read_at(0, &mut buf).unwrap();
+    drop(r);
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(buf[..], data[..64]);
+}
+
+/// A differencing image is still refused AS a differencing image when it
+/// carries the required ParentLocator every real one has (#69).
+///
+/// The differencing refusal sits before the required-item check for
+/// exactly this: the other order refuses the file as an unrecognised
+/// metadata item, which is true and tells the user nothing.
+#[test]
+fn a_differencing_image_with_its_required_parent_locator_is_refused_as_differencing() {
+    let path = tmp_path("differencing_parent_locator");
+    build_vhdx_with_file_params_flags(&path, &pattern_block(14), 0x2);
+    add_metadata_item(&path, PARENT_LOCATOR_ID, METADATA_IS_REQUIRED);
+
+    let result = VhdxReader::open(&path);
+    let _ = std::fs::remove_file(&path);
+    match result {
+        Err(Error::Unsupported(m)) => assert!(
+            m.contains("differencing"),
+            "refused, but not as a differencing image: {m}"
+        ),
+        Ok(_) => panic!("a differencing image opened"),
+        Err(e) => panic!("a differencing image gave {e:?}"),
+    }
+}

@@ -335,6 +335,144 @@ fn an_unknown_optional_region_is_ignored() {
     assert_eq!(buf, data[..4096]);
 }
 
+/// The metadata region's file offset, read out of the first region
+/// table rather than assumed.
+fn metadata_region_offset(bytes: &[u8]) -> usize {
+    let at = 192 * 1024;
+    assert_eq!(&bytes[at..at + 4], b"regi", "no region table at {at}");
+    let count = u32::from_le_bytes(bytes[at + 8..at + 12].try_into().unwrap()) as usize;
+    (0..count)
+        .map(|i| at + 16 + i * 32)
+        .find(|off| bytes[*off..*off + 16] == vhdx::region_table::guids::METADATA)
+        .map(|off| u64::from_le_bytes(bytes[off + 16..off + 24].try_into().unwrap()) as usize)
+        .expect("the region table names a metadata region")
+}
+
+/// The metadata table's entries as `(item_id, flags)`.
+fn metadata_items(path: &Path) -> Vec<([u8; 16], u32)> {
+    let bytes = std::fs::read(path).unwrap();
+    let at = metadata_region_offset(&bytes);
+    assert_eq!(&bytes[at..at + 8], b"metadata", "no metadata table at {at}");
+    let count = u16::from_le_bytes([bytes[at + 10], bytes[at + 11]]) as usize;
+    (0..count)
+        .map(|i| {
+            let off = at + 32 + i * 32;
+            let id: [u8; 16] = bytes[off..off + 16].try_into().unwrap();
+            let flags = u32::from_le_bytes(bytes[off + 24..off + 28].try_into().unwrap());
+            (id, flags)
+        })
+        .collect()
+}
+
+/// Append a metadata entry to a qemu image, reusing the last entry's
+/// item data so the table stays in bounds. The metadata table carries no
+/// checksum, so nothing else needs repair.
+fn add_metadata_item(path: &Path, item_id: [u8; 16], flags: u32) {
+    let mut bytes = std::fs::read(path).unwrap();
+    let at = metadata_region_offset(&bytes);
+    let count = u16::from_le_bytes([bytes[at + 10], bytes[at + 11]]) as usize;
+    let last = at + 32 + (count - 1) * 32;
+    let off = at + 32 + count * 32;
+    let data_location: [u8; 8] = bytes[last + 16..last + 24].try_into().unwrap();
+    bytes[off..off + 16].copy_from_slice(&item_id);
+    bytes[off + 16..off + 24].copy_from_slice(&data_location);
+    bytes[off + 24..off + 28].copy_from_slice(&flags.to_le_bytes());
+    bytes[at + 10..at + 12].copy_from_slice(&((count + 1) as u16).to_le_bytes());
+    std::fs::write(path, &bytes).unwrap();
+}
+
+/// Metadata entry flag bit 2.
+const METADATA_IS_REQUIRED: u32 = 0x4;
+
+/// THE ORDERING PROOF FOR #44: an image qemu writes carries required
+/// metadata items beyond the three this crate decodes -- Page 83 Data and
+/// PhysicalSectorSize -- and must still open. A required-item gate that
+/// landed before those two were recognised would refuse every image the
+/// reference tool writes; this is the test that says so.
+#[test]
+fn a_stock_qemu_image_with_required_items_we_do_not_decode_still_opens() {
+    const PAGE_83_DATA: [u8; 16] = [
+        0xAB, 0x12, 0xCA, 0xBE, 0xE6, 0xB2, 0x23, 0x45, 0x93, 0xEF, 0xC3, 0x09, 0xE0, 0x00, 0xC7,
+        0x46,
+    ];
+    const PHYSICAL_SECTOR_SIZE: [u8; 16] = [
+        0xC7, 0x48, 0xA3, 0xCD, 0x5D, 0x44, 0x71, 0x44, 0x9C, 0xC9, 0xE9, 0x88, 0x52, 0x51, 0xC5,
+        0x56,
+    ];
+    let p = tmp_path("stock-required-items");
+    qemu_create(&p, "8M");
+
+    // Precondition: the fixture really does carry both, marked required,
+    // or this test proves nothing about the gate.
+    let items = metadata_items(&p);
+    for (name, id) in [
+        ("Page 83 Data", PAGE_83_DATA),
+        ("PhysicalSectorSize", PHYSICAL_SECTOR_SIZE),
+    ] {
+        assert!(
+            items
+                .iter()
+                .any(|(item, flags)| *item == id && flags & METADATA_IS_REQUIRED != 0),
+            "precondition: qemu's image must carry {name} marked required, got {items:?}"
+        );
+    }
+
+    VhdxReader::open(&p).expect("an image qemu writes must open");
+}
+
+/// A metadata item qemu does not recognise, marked required, is a file
+/// qemu refuses -- and so do we (#44). Both halves are asserted, so the
+/// test cannot pass by the patch failing to take effect.
+#[test]
+fn an_unknown_required_metadata_item_is_refused_like_qemu_refuses_it() {
+    let p = tmp_path("required-metadata-item");
+    qemu_create(&p, "8M");
+    VhdxReader::open(&p).expect("the unpatched image must open");
+
+    add_metadata_item(&p, [0xFF; 16], 0x2 | METADATA_IS_REQUIRED);
+
+    let refusal = run_qemu(&["info", p.to_str().unwrap()]);
+    assert!(
+        !refusal.status.success(),
+        "precondition: qemu must refuse an unknown required metadata item"
+    );
+    match VhdxReader::open(&p) {
+        Err(vhdx::Error::Unsupported(msg)) => assert!(
+            msg.contains("metadata item"),
+            "the refusal must name the metadata item, got {msg:?}"
+        ),
+        Err(other) => panic!("expected Unsupported, got {other:?}"),
+        Ok(_) => panic!(
+            "opened a file qemu refuses: {}",
+            String::from_utf8_lossy(&refusal.stderr).trim()
+        ),
+    }
+}
+
+/// The same item with the flag clear: qemu opens it, and so do we, and
+/// the payload still reads.
+#[test]
+fn an_unknown_optional_metadata_item_is_ignored_like_qemu_ignores_it() {
+    let raw = raw_path("optional-metadata-item");
+    let p = tmp_path("optional-metadata-item");
+    let data = pattern(1024 * 1024);
+    std::fs::write(&raw, &data).unwrap();
+    qemu_convert_raw_to_vhdx(&raw, &p);
+
+    add_metadata_item(&p, [0xFF; 16], 0x2);
+
+    let info = run_qemu(&["info", p.to_str().unwrap()]);
+    assert!(
+        info.status.success(),
+        "precondition: qemu must accept an unknown optional metadata item: {}",
+        String::from_utf8_lossy(&info.stderr).trim()
+    );
+    let r = VhdxReader::open(&p).expect("an unknown optional item must be ignored");
+    let mut buf = vec![0u8; 4096];
+    r.read_at(0, &mut buf).unwrap();
+    assert_eq!(buf, data[..4096]);
+}
+
 /// Direction 1 (cross-read, trivial): a blank qemu VHDX reads as all
 /// zeros through our reader, and we report the geometry qemu encoded.
 /// Misparsing the header/metadata would corrupt the BAT walk and
