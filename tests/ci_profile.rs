@@ -899,6 +899,9 @@ fn qualifying_runs(script: &str) -> Vec<(String, Vec<bool>)> {
     let mut out = Vec::new();
     let mut exported = false;
     let last_line = lines.len().saturating_sub(1);
+    // Whether the previous line ended in `&&` or `||`, continuing its
+    // list onto this one.
+    let mut continues_a_list = false;
     for (line_index, line) in lines.iter().enumerate() {
         // A disqualified line still runs, and may still export.
         let disqualified = line.contains("--release")
@@ -917,10 +920,13 @@ fn qualifying_runs(script: &str) -> Vec<(String, Vec<bool>)> {
             if qualifies {
                 qualifying.push(exported || prefixes_the_handshake(words));
             }
-            if export_persists(&commands, index) {
+            if export_persists(line, &commands, index, continues_a_list) {
                 exported = true;
             }
         }
+        continues_a_list = commands
+            .last()
+            .is_some_and(|(_, sep)| matches!(sep, Sep::And | Sep::Or));
         if !qualifying.is_empty() {
             out.push((line.to_string(), qualifying));
         }
@@ -937,12 +943,34 @@ fn qualifying_runs(script: &str) -> Vec<(String, Vec<bool>)> {
 /// MEASURED with `bash -c`, counting the handshake in `env` afterwards:
 /// `export …; env` 1, `export … | cat; env` 0, `export … & wait; env` 0,
 /// `echo $(export …); env` 0.
-fn export_persists(commands: &[(Vec<String>, Sep)], index: usize) -> bool {
+///
+/// Two more that the separators on this line cannot show, both found by
+/// Greptile on #93 and measured the same way:
+///
+/// - a `( … )` subshell: `(export …)` then `env` shows it 0 times. The
+///   tokeniser flattens a subshell's commands into the line, so a line
+///   holding any `(` does not export. That also refuses a persistent
+///   export beside a substitution such as `echo $(date); export …` --
+///   over-strict, the safe direction; the `env:` mapping is the spelling;
+/// - a list continued from the previous line: `false &&` then `export …`
+///   on the next line shows it 0 times, so a line whose predecessor ended
+///   in `&&` or `||` starts with a conditional arm.
+fn export_persists(
+    line: &str,
+    commands: &[(Vec<String>, Sep)],
+    index: usize,
+    continues_a_list: bool,
+) -> bool {
     let (words, sep) = &commands[index];
-    let conditional = index > 0 && matches!(commands[index - 1].1, Sep::And | Sep::Or);
+    let conditional = if index == 0 {
+        continues_a_list
+    } else {
+        matches!(commands[index - 1].1, Sep::And | Sep::Or)
+    };
     exports_the_handshake(words)
         && matches!(sep, Sep::Semi | Sep::End | Sep::And | Sep::Or)
         && !conditional
+        && !line.contains('(')
 }
 
 /// WHAT ELSE DECIDES WHETHER A STEP GATES.
@@ -3072,6 +3100,13 @@ mod gating {
             // condition, which is over-strict when it succeeds -- the
             // safe direction, and the `env:` mapping is the spelling.
             "      - run: |\n          test -f x && export EXPECT_OVERFLOW_CHECKS=1\n          cargo test --locked --lib\n",
+            // A subshell, whose export dies with it (#93): 0 times.
+            "      - run: |\n          (export EXPECT_OVERFLOW_CHECKS=1)\n          cargo test --locked --lib\n",
+            "      - run: (export EXPECT_OVERFLOW_CHECKS=1); cargo test --locked --lib\n",
+            // The conditional arm of a list continued from the line
+            // before (#93): `false &&` then `export …` shows it 0 times.
+            "      - run: |\n          test -f x &&\n            export EXPECT_OVERFLOW_CHECKS=1\n          cargo test --locked --lib\n",
+            "      - run: |\n          true ||\n            export EXPECT_OVERFLOW_CHECKS=1\n          cargo test --locked --lib\n",
         ]
         .into_iter()
         .filter(|block| {
