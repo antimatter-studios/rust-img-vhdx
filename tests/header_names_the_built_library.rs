@@ -537,6 +537,56 @@ fn the_staticlib_task_fingerprints_the_tests_it_runs_and_no_others() {
     }
 }
 
+/// THE TASK FINGERPRINTS ITS OWN DEFINITION.
+///
+/// `cmds:`, the `cp` destinations and `vars.LIBNAME` all live in
+/// `chores.yml`, and `chore` does not fingerprint a task's definition on
+/// its own. Measured (#88): with `- chores.yml` deleted from `sources:`,
+/// a content edit to `chores.yml` printed `task: staticlib is up to
+/// date` and ran nothing -- so a changed command never runs and the
+/// previous build's `.a` and header ship.
+///
+/// Its own check, deliberately, not a widened [`test_sources`]: that
+/// list feeds "nothing else under `tests/` is fingerprinted", which
+/// `Cargo.toml` and `src/**/*.rs` would fail on a correct manifest.
+/// Before this, deleting the line left every test in this file green.
+#[test]
+fn the_staticlib_task_fingerprints_its_own_definition() {
+    let chores = read("chores.yml");
+    let sources = staticlib_list(&chores, "sources");
+    assert!(
+        !sources.is_empty(),
+        "staticlib's sources: read as empty, so nothing below could fail"
+    );
+    assert!(
+        sources.iter().any(|s| s == "chores.yml"),
+        "chores.yml does not list itself under staticlib's sources:, so changing \
+         cmds:, the cp paths or vars.LIBNAME leaves the task up to date and the \
+         changed command never runs. That is #88. sources: names {sources:?}"
+    );
+}
+
+/// The reader behind that check, on manifests rather than the tree: the
+/// entry is found however it is quoted, and its absence is seen.
+#[test]
+fn the_definition_entry_is_read_however_it_is_quoted() {
+    for (entry, listed) in [
+        ("      - chores.yml\n", true),
+        ("      - 'chores.yml'\n", true),
+        ("      - \"chores.yml\"\n", true),
+        ("      - Cargo.toml\n", false),
+    ] {
+        let chores = format!("tasks:\n  staticlib:\n    sources:\n{entry}");
+        assert_eq!(
+            staticlib_list(&chores, "sources")
+                .iter()
+                .any(|s| s == "chores.yml"),
+            listed,
+            "{entry:?}"
+        );
+    }
+}
+
 /// The too-wide direction, on a manifest rather than on the tree: the
 /// glob this repository shipped.
 #[test]
