@@ -26,14 +26,17 @@ linked.
       non-empty log is reported as `ReadOnly` rather than silently
       serving stale data zones.
 - [x] Write path. Allocates fresh blocks at the device tail for
-      unallocated / zero / unmapped / partially-present BAT entries,
-      writes through to allocated blocks otherwise. BAT mutations are
+      unallocated / zero / unmapped BAT entries, writes through to
+      allocated blocks otherwise, and refuses partially-present ones.
+      Where the log region can hold the entry, BAT mutations are
       journalled through the log first (one-descriptor entry per
-      sector) so a crash mid-write is recoverable on next open. After
+      sector) so a crash mid-write is recoverable on next open; an
+      absent or too-small log region publishes the BAT entry
+      unjournalled. After
       the BAT is published the active header is rotated to the other
       slot with a fresh `file_write_guid` per the spec.
-- [ ] PartiallyPresent blocks on read (sector bitmap walking) — writes
-      promote to FullyPresent.
+- [ ] PartiallyPresent blocks (sector bitmap walking) — reads and
+      writes touching one are refused as unsupported.
 - [ ] Differencing chains (parent locator metadata + chain walk).
 
 ## Spec

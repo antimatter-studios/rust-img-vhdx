@@ -34,19 +34,21 @@ extern "C" {
  *   - BAT walk for FullyPresent and zero-state blocks
  *   - Log replay against dirty images (data + zero descriptors)
  *   - Read-write writes that allocate fresh blocks at the device tail
- *     and journal the BAT mutation through the log for crash safety
+ *     and journal the BAT mutation through the log where it fits
  *
  * Not yet supported (returns FS_CORE_CUSTOM with detail):
- *   - PartiallyPresent blocks on read (sector bitmap walking) — writes
- *     into such entries promote the block to FullyPresent
+ *   - PartiallyPresent blocks (sector bitmap walking) — reads and
+ *     writes touching such a block both fail
  *   - Differencing chains (parent VHDX)
  *
  * `vhdx_open` opens read-only — `fs_core_device_write_at` returns
  * FS_CORE_READ_ONLY.
  *
  * `vhdx_open_rw` opens read-write. Writes against unallocated blocks
- * extend the image at the tail, BAT mutations are journalled through
- * the log first so a crash mid-write is recoverable on next open.
+ * extend the image at the tail. Where the image's log region can hold
+ * the entry, BAT mutations are journalled through the log first so a
+ * crash mid-write is recoverable on next open; with no usable log
+ * region the BAT entry is published unjournalled.
  */
 FsCoreDevice *vhdx_open(const char *path);
 FsCoreDevice *vhdx_open_rw(const char *path);
