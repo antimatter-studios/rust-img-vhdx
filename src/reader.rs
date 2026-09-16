@@ -534,16 +534,30 @@ impl VhdxReader {
         // this only makes the point at which it is reported match what
         // is written down.
         //
-        // Deliberately before the region and metadata work below that
-        // could refuse it for a less useful reason: a differencing
-        // image carries a ParentLocator item marked required, so a
-        // required-item check would refuse it as "unrecognised required
-        // metadata item A8D35F2D-…" instead of saying what it is.
+        // Deliberately before the required-item check that follows,
+        // which would otherwise refuse it for a less useful reason: a
+        // differencing image carries a ParentLocator item marked
+        // required, which this crate does not recognise, so that check
+        // would refuse it as an unrecognised required metadata item
+        // instead of saying what it is.
         if file_params.has_parent() {
             return Err(Error::Unsupported(
                 "a differencing VHDX (one with a parent chain), which this crate does not \
                  implement — the data lives partly in the parent, so reading this file \
                  alone would serve zeros for everything the parent still owns",
+            ));
+        }
+
+        // A metadata item this reader does not know, that the file says
+        // it must. The metadata twin of the region gate at 4a: the flag
+        // was parsed onto `MetadataEntry` and read by nothing, so such a
+        // file opened as though the item were not there. `qemu-img`
+        // refuses it. See `MetadataTable::unknown_required` for why the
+        // recognised set is wider than the three items decoded above.
+        if metadata.unknown_required().is_some() {
+            return Err(Error::Unsupported(
+                "a metadata item marked Required whose GUID this crate does not recognise — \
+                 the file needs something to be read correctly that this crate does not implement",
             ));
         }
 

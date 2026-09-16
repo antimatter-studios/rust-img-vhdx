@@ -50,12 +50,41 @@ pub mod item_ids {
         0x1D, 0xBF, 0x41, 0x81, 0x6F, 0xA9, 0x09, 0x47, 0xBA, 0x47, 0xF2, 0x33, 0xA8, 0xFA, 0xAB,
         0x5F,
     ];
+    /// Page 83 Data: BECA12AB-B2E6-4523-93EF-C309E000C746
+    pub const PAGE_83_DATA: [u8; 16] = [
+        0xAB, 0x12, 0xCA, 0xBE, 0xE6, 0xB2, 0x23, 0x45, 0x93, 0xEF, 0xC3, 0x09, 0xE0, 0x00, 0xC7,
+        0x46,
+    ];
     /// Physical Sector Size: CDA348C7-445D-4471-9CC9-E9885251C556
     pub const PHYSICAL_SECTOR_SIZE: [u8; 16] = [
         0xC7, 0x48, 0xA3, 0xCD, 0x5D, 0x44, 0x71, 0x44, 0x9C, 0xC9, 0xE9, 0x88, 0x52, 0x51, 0xC5,
         0x56,
     ];
 }
+
+/// Metadata entry flag bit 2: the item must be understood to read the
+/// file.
+pub const METADATA_FLAG_IS_REQUIRED: u32 = 0x4;
+
+/// The metadata items this crate recognises, for the purpose of the
+/// `IsRequired` gate.
+///
+/// Page 83 Data and PhysicalSectorSize are here although neither is
+/// decoded: neither changes how the payload is read, and every image
+/// `qemu-img` writes carries both marked required (measured, qemu-img
+/// 10.2.2: five entries, all required). Leaving them out would make the
+/// gate refuse every image the reference tool writes.
+///
+/// ParentLocator is deliberately absent. A differencing image is refused
+/// at open before this gate runs, so the refusal names what the file is
+/// rather than an unrecognised item.
+pub const RECOGNISED_ITEMS: [[u8; 16]; 5] = [
+    item_ids::FILE_PARAMETERS,
+    item_ids::VIRTUAL_DISK_SIZE,
+    item_ids::PAGE_83_DATA,
+    item_ids::LOGICAL_SECTOR_SIZE,
+    item_ids::PHYSICAL_SECTOR_SIZE,
+];
 
 #[derive(Debug, Clone, Copy)]
 pub struct MetadataEntry {
@@ -108,6 +137,15 @@ impl MetadataTable {
         Ok(Self {
             entries,
             region_bytes: bytes,
+        })
+    }
+
+    /// The first entry marked `IsRequired` whose item this crate does not
+    /// recognise (see [`RECOGNISED_ITEMS`]). Such a file must not be read:
+    /// `qemu-img` refuses it with "Operation not supported".
+    pub fn unknown_required(&self) -> Option<&MetadataEntry> {
+        self.entries.iter().find(|e| {
+            e.flags & METADATA_FLAG_IS_REQUIRED != 0 && !RECOGNISED_ITEMS.contains(&e.item_id)
         })
     }
 

@@ -27,7 +27,11 @@ pub const REGION_TABLE2_OFFSET: u64 = 256 * 1024;
 pub const METADATA_REGION_OFFSET: u64 = ONE_MIB;
 pub const BAT_REGION_OFFSET: u64 = 2 * ONE_MIB;
 pub const DATA_BLOCK_OFFSET: u64 = 3 * ONE_MIB;
-pub const LOGICAL_SECTOR_SIZE_OFFSET: u64 = METADATA_REGION_OFFSET + 144;
+/// Where item data starts in the synthetic metadata region: after room
+/// for eight entries, so a test can append entries to the three the
+/// builder writes without overwriting FileParameters.
+pub const METADATA_ITEMS_START: u64 = 32 + 8 * 32;
+pub const LOGICAL_SECTOR_SIZE_OFFSET: u64 = METADATA_REGION_OFFSET + METADATA_ITEMS_START + 16;
 
 pub const BAT_REGION_LEN: u32 = 8; // one entry
 pub const BLOCK_SIZE: u32 = ONE_MIB as u32;
@@ -140,7 +144,7 @@ pub fn encode_metadata_with_flags(
     meta[0..8].copy_from_slice(b"metadata");
     meta[10..12].copy_from_slice(&3u16.to_le_bytes()); // entry_count = 3
 
-    let items_start = 32 + 3 * 32; // 128
+    let items_start = METADATA_ITEMS_START;
     let file_params_off = items_start as u32;
     let file_params_len = 8u32;
     let virt_size_off = file_params_off + file_params_len;
