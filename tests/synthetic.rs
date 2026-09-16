@@ -218,9 +218,40 @@ fn ro_open_against_writable_file_replays_dirty_log() {
     r.read_at(8192, &mut got).unwrap();
     assert!(got.iter().all(|b| *b == 0xEE), "first byte: {:#x}", got[0]);
 
-    // 5. Reopening must NOT replay again — log_guid was cleared.
+    // 5. The replay cleared log_guid (#48). A reopen that merely succeeded
+    //    proved nothing: on a writable file it would replay the same
+    //    idempotent chain again, and the replay also zeroes the log region,
+    //    so even a read-only open finds no chain whether or not the GUID was
+    //    cleared. So the header is read raw: of the two slots, the one with
+    //    the higher sequence number is current, and its log_guid (bytes
+    //    48..64) must be zero. Then the replayed sector is read back through
+    //    a read-only device, rather than the image only being reopened.
     drop(r);
-    let _ = VhdxReader::open(&path).unwrap();
+    let raw = std::fs::read(&path).unwrap();
+    let slot = |at: usize| {
+        let h = &raw[at..at + 4096];
+        assert_eq!(&h[..4], b"head", "header slot at {at:#x}");
+        (
+            u64::from_le_bytes(h[8..16].try_into().unwrap()),
+            h[48..64].to_vec(),
+        )
+    };
+    let (a, b) = (slot(64 * 1024), slot(128 * 1024));
+    let current_log_guid = if a.0 > b.0 { a.1 } else { b.1 };
+    assert_eq!(
+        current_log_guid,
+        vec![0u8; 16],
+        "the current header still names the replayed log"
+    );
+    let ro = std::sync::Arc::new(fs_core::FileDevice::open(&path).unwrap());
+    let r = VhdxReader::open_on_device(ro)
+        .expect("a read-only reopen succeeds only if the replay cleared log_guid");
+    let mut again = [0u8; 4096];
+    r.read_at(8192, &mut again).unwrap();
+    assert!(
+        again.iter().all(|b| *b == 0xEE),
+        "the replayed sector did not persist"
+    );
     let _ = std::fs::remove_file(&path);
 }
 
@@ -817,4 +848,118 @@ fn a_journalled_write_after_replay_rotates_off_the_header_replay_wrote() {
     );
 
     let _ = std::fs::remove_file(&path);
+}
+
+/// A device that silently drops every write after the first `budget`, as
+/// power loss would.
+struct CutAfter {
+    inner: fs_core::FileDevice,
+    budget: usize,
+    writes: std::sync::atomic::AtomicUsize,
+}
+
+impl fs_core::BlockRead for CutAfter {
+    fn read_at(&self, offset: u64, buf: &mut [u8]) -> fs_core::Result<()> {
+        self.inner.read_at(offset, buf)
+    }
+    fn size_bytes(&self) -> u64 {
+        fs_core::BlockRead::size_bytes(&self.inner)
+    }
+}
+
+impl fs_core::BlockDevice for CutAfter {
+    fn write_at(&self, offset: u64, buf: &[u8]) -> fs_core::Result<()> {
+        let n = self
+            .writes
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if n < self.budget {
+            self.inner.write_at(offset, buf)?;
+        }
+        Ok(())
+    }
+    fn flush(&self) -> fs_core::Result<()> {
+        self.inner.flush()
+    }
+    fn is_writable(&self) -> bool {
+        true
+    }
+}
+
+/// OUR READER REPLAYS THE LOG OUR WRITER LEFT, at every point a crash can
+/// leave it (#48).
+///
+/// Every other replay test either builds its log with this crate's encoder
+/// and nothing else, or hands the file to `qemu-img check -r all` first, so
+/// qemu does the replaying. Here one journalled write is cut after each of
+/// its device writes in turn, the file is reopened through `VhdxReader`
+/// alone, and the written range must read as all old bytes or all new ones.
+/// At least one cut must leave the BAT update only in the log for the reopen
+/// to replay, or the replay path this exists for was never exercised.
+#[test]
+fn a_journalled_write_cut_anywhere_reopens_as_before_or_after() {
+    // Into block 1, which the fixture leaves unallocated: the write
+    // allocates it, and it is the BAT update that goes through the log.
+    let start = u64::from(BIG_BLOCK_SIZE) + 12 * 1024;
+    let new = [0xC7u8; 4096];
+    let old = [0u8; 4096];
+    let mut total = None;
+    let mut replayed_cuts = 0;
+
+    for cut in 0.. {
+        let path = tmp_path(&format!("cut{cut}"));
+        build_big_vhdx(&path, &pattern_block(9));
+
+        let dev = std::sync::Arc::new(CutAfter {
+            inner: fs_core::FileDevice::open_rw(&path).unwrap(),
+            budget: cut,
+            writes: std::sync::atomic::AtomicUsize::new(0),
+        });
+        {
+            let r = VhdxReader::open_rw_on_device(dev.clone()).unwrap();
+            r.write_at(start, &new).unwrap();
+            r.flush().unwrap();
+        }
+        let written = dev.writes.load(std::sync::atomic::Ordering::SeqCst);
+        total.get_or_insert(written);
+
+        // What the crash left on disk, before anything replays it: whether
+        // block 1's BAT entry already says the block is present (the low
+        // three bits; 0 is "not present").
+        let raw = std::fs::read(&path).unwrap();
+        let bat_1 = BIG_BAT_OFFSET as usize + 8;
+        let present_on_disk =
+            u64::from_le_bytes(raw[bat_1..bat_1 + 8].try_into().unwrap()) & 7 != 0;
+
+        let r = VhdxReader::open(&path).expect("the image reopens after the cut");
+        let mut got = vec![0u8; new.len()];
+        r.read_at(start, &mut got).unwrap();
+        assert!(
+            got == old || got == new,
+            "cut {cut}: the range reads as a mixture of old and new bytes"
+        );
+        drop(r);
+        // THE REPLAY DID IT: block 1's BAT entry was absent on disk after
+        // the cut and is present once our reader has opened the file. Only
+        // replaying the log can have written it. (The data is the writer's
+        // last write, so a replayed allocation can still read as zeros;
+        // the BAT is the observable.)
+        let after = std::fs::read(&path).unwrap();
+        let present_after =
+            u64::from_le_bytes(after[bat_1..bat_1 + 8].try_into().unwrap()) & 7 != 0;
+        if !present_on_disk && present_after {
+            replayed_cuts += 1;
+        }
+        let _ = std::fs::remove_file(&path);
+        if cut >= written {
+            break;
+        }
+    }
+    assert!(
+        total.unwrap_or(0) > 1,
+        "the write must span several device writes"
+    );
+    assert!(
+        replayed_cuts > 0,
+        "no cut left the BAT update only in the log for the reopen to replay"
+    );
 }
