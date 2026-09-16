@@ -905,12 +905,22 @@ fn a_journalled_write_cut_anywhere_reopens_as_before_or_after() {
     let mut total = None;
     let mut replayed_cuts = 0;
 
+    /// Removes the image when the iteration ends, including by a failed
+    /// assertion.
+    struct RemoveOnDrop(std::path::PathBuf);
+    impl Drop for RemoveOnDrop {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
     for cut in 0.. {
-        let path = tmp_path(&format!("cut{cut}"));
-        build_big_vhdx(&path, &pattern_block(9));
+        let image = RemoveOnDrop(tmp_path(&format!("cut{cut}")));
+        let path = &image.0;
+        build_big_vhdx(path, &pattern_block(9));
 
         let dev = std::sync::Arc::new(CutAfter {
-            inner: fs_core::FileDevice::open_rw(&path).unwrap(),
+            inner: fs_core::FileDevice::open_rw(path).unwrap(),
             budget: cut,
             writes: std::sync::atomic::AtomicUsize::new(0),
         });
@@ -925,12 +935,12 @@ fn a_journalled_write_cut_anywhere_reopens_as_before_or_after() {
         // What the crash left on disk, before anything replays it: whether
         // block 1's BAT entry already says the block is present (the low
         // three bits; 0 is "not present").
-        let raw = std::fs::read(&path).unwrap();
+        let raw = std::fs::read(path).unwrap();
         let bat_1 = BIG_BAT_OFFSET as usize + 8;
         let present_on_disk =
             u64::from_le_bytes(raw[bat_1..bat_1 + 8].try_into().unwrap()) & 7 != 0;
 
-        let r = VhdxReader::open(&path).expect("the image reopens after the cut");
+        let r = VhdxReader::open(path).expect("the image reopens after the cut");
         let mut got = vec![0u8; new.len()];
         r.read_at(start, &mut got).unwrap();
         assert!(
@@ -943,13 +953,12 @@ fn a_journalled_write_cut_anywhere_reopens_as_before_or_after() {
         // replaying the log can have written it. (The data is the writer's
         // last write, so a replayed allocation can still read as zeros;
         // the BAT is the observable.)
-        let after = std::fs::read(&path).unwrap();
+        let after = std::fs::read(path).unwrap();
         let present_after =
             u64::from_le_bytes(after[bat_1..bat_1 + 8].try_into().unwrap()) & 7 != 0;
         if !present_on_disk && present_after {
             replayed_cuts += 1;
         }
-        let _ = std::fs::remove_file(&path);
         if cut >= written {
             break;
         }
