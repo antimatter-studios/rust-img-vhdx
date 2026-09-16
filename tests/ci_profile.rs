@@ -112,34 +112,38 @@ fn read_or_panic(path: &Path) -> String {
 /// is cut first, because a backslash inside one continues nothing.
 fn command_lines(script: &str) -> Vec<String> {
     let mut out = Vec::new();
-    let mut pending: Option<String> = None;
-    for line in script.lines().map(str::trim_start) {
-        let line = match comment_start(line) {
-            Some(at) => &line[..at],
-            None => line,
-        };
-        let trailing = line.len() - line.trim_end_matches('\\').len();
-        let (text, continues) = if trailing % 2 == 1 {
-            (&line[..line.len() - 1], true)
+    // The logical line so far, with every continuation's backslash and
+    // newline removed and NOTHING put in their place: bash joins
+    // `export EXPECT_OVERFL\` and `OW_CHECKS=1` into one word (Greptile
+    // on #93), and the continued line's own leading whitespace is what
+    // separates words when there is any. A comment is looked for in the
+    // joined text, because `a\` then `#b` is the word `a#b`.
+    let mut pending = String::new();
+    for line in script.lines() {
+        if pending.is_empty() {
+            pending.push_str(line.trim_start());
         } else {
-            (line, false)
-        };
-        let joined = match pending.take() {
-            Some(mut head) => {
-                head.push(' ');
-                head.push_str(text.trim());
-                head
-            }
-            None => text.trim().to_string(),
-        };
-        if continues {
-            pending = Some(joined);
-        } else if !joined.trim().is_empty() {
-            out.push(joined.trim().to_string());
+            pending.push_str(line);
         }
+        if let Some(at) = comment_start(&pending) {
+            // A backslash inside a comment continues nothing.
+            pending.truncate(at);
+        } else {
+            let trailing = pending.len() - pending.trim_end_matches('\\').len();
+            if trailing % 2 == 1 {
+                pending.pop();
+                continue;
+            }
+        }
+        let logical = pending.trim();
+        if !logical.is_empty() {
+            out.push(logical.to_string());
+        }
+        pending.clear();
     }
-    if let Some(rest) = pending.filter(|rest| !rest.trim().is_empty()) {
-        out.push(rest.trim().to_string());
+    let rest = pending.trim();
+    if !rest.is_empty() {
+        out.push(rest.to_string());
     }
     out
 }
@@ -3165,6 +3169,9 @@ mod gating {
             "      - run: export EXPECT_OVERFLOW_CHECKS=1 && cargo test --locked --lib\n",
             // A continued line that is not a list still exports: 1 time.
             "      - run: |\n          echo a \\\n            b\n          export EXPECT_OVERFLOW_CHECKS=1\n          cargo test --locked --lib\n",
+            // A continuation joins with nothing in between, so a word split
+            // across the lines is one word (Greptile on #93): 1 time.
+            "      - run: |\n          export EXPECT_OVERFL\\\n          OW_CHECKS=1\n          cargo test --locked --lib\n",
         ] {
             let yaml = GATING.replace(
                 "      - run: EXPECT_OVERFLOW_CHECKS=1 cargo test --locked --lib\n",
