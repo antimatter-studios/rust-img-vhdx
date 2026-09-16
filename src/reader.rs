@@ -51,7 +51,9 @@
 use crate::bat::{chunk_ratio as compute_chunk_ratio, data_bat_index, BatEntry, PayloadState};
 use crate::error::{Error, Result};
 use crate::header::{Header, HEADER1_OFFSET, HEADER2_OFFSET, HEADER_SIZE, LOG_VERSION_V0};
-use crate::log::{apply_chain, collect_replay_chain, encode_entry, PendingWrite, LOG_SECTOR_SIZE};
+use crate::log::{
+    apply_chain, collect_replay_chain_checked, encode_entry, PendingWrite, LOG_SECTOR_SIZE,
+};
 use crate::metadata::{
     item_ids, read_sector_size, read_virtual_disk_size, FileParameters, MetadataTable,
 };
@@ -395,7 +397,7 @@ impl VhdxReader {
             ];
             dev.read_at(header.log_offset, &mut log_bytes)
                 .map_err(fs_core_to_vhdx_error)?;
-            let chain = collect_replay_chain(&log_bytes, &header.log_guid);
+            let chain = collect_replay_chain_checked(&log_bytes, &header.log_guid)?;
             if !chain.is_empty() {
                 // WHETHER WE CAN WRITE IS ASKED HERE, NOT ABOVE.
                 //

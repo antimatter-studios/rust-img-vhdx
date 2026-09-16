@@ -169,6 +169,7 @@ fn parse_log_entry(
     pos: usize,
     expected_log_guid: &[u8; 16],
     checksum_budget: &mut usize,
+    budget_exhausted: &mut bool,
 ) -> ParseOutcome {
     if pos + LOG_SECTOR_SIZE > log_bytes.len() {
         return Err(EntryReject::Empty);
@@ -207,7 +208,16 @@ fn parse_log_entry(
     // entries tile it without overlapping, so discovery checksums each
     // byte about once; four times that leaves room for a region that is
     // partly rewritten without leaving room for the quadratic case.
+    //
+    // RUNNING OUT IS NOT A VERDICT ON THIS SLOT (#73). The slot is
+    // refused unexamined, and every slot after it will be too, so the
+    // chain discovery returns may be missing entries that were never
+    // looked at. The flag lets the caller refuse that chain rather than
+    // replay a prefix and mark the image clean. Charging only slots that
+    // pass their checksum would not do: a slot that fails it costs just
+    // as much to checksum, and the quadratic case is made of those.
     if *checksum_budget < entry_length {
+        *budget_exhausted = true;
         return Err(EntryReject::Corrupt);
     }
     *checksum_budget -= entry_length;
@@ -347,13 +357,14 @@ fn entry_starting_at(found: &[LogEntry], offset: usize) -> Option<&LogEntry> {
 /// See the budget note in `parse_log_entry` for what this stops.
 pub const DISCOVERY_CHECKSUM_PASSES: usize = 4;
 
-/// Probe every slot in the region and return what is there, along with
-/// how many bytes were checksummed doing it.
+/// Probe every slot in the region and return what is there, how many
+/// bytes were checksummed doing it, and whether the budget ran out -- in
+/// which case slots were refused without being examined.
 ///
 /// Split out from [`collect_replay_chain`] so the budget is testable:
 /// the number returned is the work the budget bounds, and a test can
 /// assert on it rather than on how long the call took.
-fn discover(log_bytes: &[u8], expected_log_guid: &[u8; 16]) -> (Vec<LogEntry>, usize) {
+fn discover(log_bytes: &[u8], expected_log_guid: &[u8; 16]) -> (Vec<LogEntry>, usize, bool) {
     // Probe every 4 KiB slot and never stop early. An entry can sit
     // anywhere in the region: the log is a circular buffer, and this
     // crate's own writer splices wherever it finds room without
@@ -361,10 +372,17 @@ fn discover(log_bytes: &[u8], expected_log_guid: &[u8; 16]) -> (Vec<LogEntry>, u
     // decides nothing about what gets applied.
     let allowance = log_bytes.len().saturating_mul(DISCOVERY_CHECKSUM_PASSES);
     let mut budget = allowance;
+    let mut exhausted = false;
     let mut found: Vec<LogEntry> = Vec::new();
     let mut pos = 0usize;
     while pos + LOG_SECTOR_SIZE <= log_bytes.len() {
-        match parse_log_entry(log_bytes, pos, expected_log_guid, &mut budget) {
+        match parse_log_entry(
+            log_bytes,
+            pos,
+            expected_log_guid,
+            &mut budget,
+            &mut exhausted,
+        ) {
             Ok(entry) => {
                 pos += entry.header.entry_length as usize;
                 found.push(entry);
@@ -375,16 +393,50 @@ fn discover(log_bytes: &[u8], expected_log_guid: &[u8; 16]) -> (Vec<LogEntry>, u
             Err(_) => pos += LOG_SECTOR_SIZE,
         }
     }
-    (found, allowance - budget)
+    (found, allowance - budget, exhausted)
 }
 
+///
+/// Discovery that runs out of checksum budget returns an empty chain
+/// here, which is indistinguishable from a log with nothing to replay.
+/// [`collect_replay_chain_checked`] tells the two apart, and is what
+/// `open` uses.
 pub fn collect_replay_chain(log_bytes: &[u8], expected_log_guid: &[u8; 16]) -> Vec<LogEntry> {
+    collect_replay_chain_checked(log_bytes, expected_log_guid).unwrap_or_default()
+}
+
+/// As [`collect_replay_chain`], refusing a region discovery could not
+/// finish examining.
+///
+/// Discovery bounds its checksum work (see `parse_log_entry`), and a
+/// region that exhausts the bound has slots nobody looked at. A valid,
+/// committed entry among them was silently absent from the chain, and
+/// `open` then replayed what was found, zeroed the log and marked the
+/// image clean -- measured on a 64 KiB region: one valid entry recovered
+/// alone, and not at all behind 13 bad-checksum slots declaring 385 KiB
+/// between them (#73). Such a region is refused as corrupt instead: the
+/// chain it would give cannot be shown to be the whole chain.
+pub fn collect_replay_chain_checked(
+    log_bytes: &[u8],
+    expected_log_guid: &[u8; 16],
+) -> crate::error::Result<Vec<LogEntry>> {
     if expected_log_guid.iter().all(|b| *b == 0) {
-        return Vec::new();
+        return Ok(Vec::new());
     }
 
     // Pass 1 — discovery.
-    let (found, _checksummed) = discover(log_bytes, expected_log_guid);
+    let (found, _checksummed, exhausted) = discover(log_bytes, expected_log_guid);
+    if exhausted {
+        return Err(crate::error::Error::Corrupt(
+            "the log region declares more entry bytes than discovery will checksum, so \
+             entries in it may not have been examined",
+        ));
+    }
+    Ok(select_chain(log_bytes, found))
+}
+
+/// Passes 2 onward: the active chain among what discovery found.
+fn select_chain(log_bytes: &[u8], found: Vec<LogEntry>) -> Vec<LogEntry> {
     if found.is_empty() {
         return found;
     }
@@ -1157,7 +1209,7 @@ mod tests {
             region[pos + 32..pos + 48].copy_from_slice(&LIVE_GUID);
         }
 
-        let (found, checksummed) = discover(&region, &LIVE_GUID);
+        let (found, checksummed, _) = discover(&region, &LIVE_GUID);
         assert!(found.is_empty(), "none of those slots is a valid entry");
         assert!(
             checksummed <= REGION * DISCOVERY_CHECKSUM_PASSES,
@@ -1167,12 +1219,56 @@ mod tests {
         );
     }
 
+    /// A valid entry behind slots that exhaust the budget is not silently
+    /// dropped (#73).
+    ///
+    /// The budget was charged before a slot's checksum was verified, and
+    /// running out refused every later slot as `Corrupt` -- the same
+    /// answer as a damaged entry. So a committed entry at 0xE000 of a
+    /// 64 KiB region was recovered alone and lost behind 13 bad-checksum
+    /// slots, and `open` would have replayed the empty chain, zeroed the
+    /// log and called the image clean. The region is refused instead.
+    #[test]
+    fn a_valid_entry_behind_slots_that_exhaust_the_budget_is_not_silently_dropped() {
+        const REGION: usize = 64 * 1024;
+        let mut region = vec![0u8; REGION];
+        splice(&mut region, 0xE000, &one_write_entry(1, 0xE000, &LIVE_GUID));
+
+        let control = collect_replay_chain_checked(&region, &LIVE_GUID)
+            .expect("a region with nothing but the entry is examined in full");
+        assert_eq!(
+            sequences(&control),
+            vec![1],
+            "control: the entry is found alone"
+        );
+
+        // Bad-checksum slots, each declaring it runs to the region's end.
+        for i in 0..13 {
+            let pos = i * LOG_SECTOR_SIZE;
+            let len = (REGION - pos) as u32;
+            region[pos..pos + 4].copy_from_slice(LOG_ENTRY_SIGNATURE);
+            region[pos + 8..pos + 12].copy_from_slice(&len.to_le_bytes());
+            region[pos + 32..pos + 48].copy_from_slice(&LIVE_GUID);
+        }
+        match collect_replay_chain_checked(&region, &LIVE_GUID) {
+            Err(crate::error::Error::Corrupt(m)) => assert!(
+                m.contains("may not have been examined"),
+                "refused, but not for the budget: {m}"
+            ),
+            Ok(chain) => panic!(
+                "discovery ran out of budget and returned a chain of {:?} as if complete",
+                sequences(&chain)
+            ),
+            Err(e) => panic!("got {e:?}"),
+        }
+    }
+
     /// The budget must not cost a well-formed region its entries: a log
     /// whose entries tile it is checksummed about once through.
     #[test]
     fn a_well_formed_region_stays_well_inside_the_budget() {
         let region = contiguous_chain(4);
-        let (found, checksummed) = discover(&region, &LIVE_GUID);
+        let (found, checksummed, _) = discover(&region, &LIVE_GUID);
         assert_eq!(sequences(&found), vec![1, 2, 3, 4]);
         assert!(
             checksummed <= region.len(),
