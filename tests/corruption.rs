@@ -882,6 +882,7 @@ fn a_bat_region_too_short_for_the_disk_is_refused_at_open() {
         Ok(_) => panic!("a BAT region half the size the disk needs was accepted"),
         Err(e) => panic!("a short BAT region gave {e:?}"),
     }
+    let _ = std::fs::remove_file(&path);
 }
 
 /// Exactly enough is enough.
@@ -901,6 +902,8 @@ fn a_bat_region_of_exactly_the_required_length_is_accepted() {
     let mut buf = [0u8; 16];
     r.read_at(0, &mut buf).unwrap();
     assert_eq!(buf[0], 0, "block 0 did not read back");
+    drop(r);
+    let _ = std::fs::remove_file(&path);
 }
 
 /// A length that is not a whole number of entries is refused rather
@@ -925,6 +928,7 @@ fn a_bat_region_length_that_is_not_whole_entries_is_refused() {
         Ok(_) => panic!("a BAT region length of 8n+4 was accepted"),
         Err(e) => panic!("a ragged BAT region gave {e:?}"),
     }
+    let _ = std::fs::remove_file(&path);
 }
 
 // ---------------------------------------------------------------------------
