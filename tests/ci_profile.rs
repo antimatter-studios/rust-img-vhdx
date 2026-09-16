@@ -878,10 +878,12 @@ fn runs_with_overflow_checks(script: &str) -> Vec<String> {
         .collect()
 }
 
-/// [`runs_with_overflow_checks`], keeping the words of the `cargo test`
-/// command that qualified each line -- the one command a `NAME=value`
-/// prefix has to be on to reach it. See [`prefixes_the_handshake`].
-fn qualifying_runs(script: &str) -> Vec<(String, Vec<String>)> {
+/// [`runs_with_overflow_checks`], keeping the words of EVERY `cargo test`
+/// command that qualified each line -- a `NAME=value` prefix has to be
+/// on one of them to reach it. See [`prefixes_the_handshake`]. Every
+/// one, not the first: `cargo test …; EXPECT_OVERFLOW_CHECKS=1 cargo
+/// test …` has its armed run second.
+fn qualifying_runs(script: &str) -> Vec<(String, Vec<Vec<String>>)> {
     let lines = command_lines(script);
     if lines.iter().any(|line| disables_errexit(line)) {
         return Vec::new();
@@ -896,6 +898,7 @@ fn qualifying_runs(script: &str) -> Vec<(String, Vec<String>)> {
             continue;
         }
         let commands = shell_commands(line);
+        let mut qualifying = Vec::new();
         for (index, (words, _)) in commands.iter().enumerate() {
             let Some(arguments) = cargo_test_arguments(words) else {
                 continue;
@@ -908,8 +911,10 @@ fn qualifying_runs(script: &str) -> Vec<(String, Vec<String>)> {
             if !status_is_read(&commands, index, line_index == last_line) {
                 continue;
             }
-            out.push((line.to_string(), words.clone()));
-            break;
+            qualifying.push(words.clone());
+        }
+        if !qualifying.is_empty() {
+            out.push((line.to_string(), qualifying));
         }
     }
     out
@@ -1467,8 +1472,8 @@ fn gating_runs_that_prove_the_build_traps(workflow: &str) -> Vec<String> {
 fn debug_runs_that_prove_the_build_traps(script: &str) -> Vec<String> {
     qualifying_runs(script)
         .into_iter()
-        .filter(|(line, run)| {
-            prefixes_the_handshake(run)
+        .filter(|(line, runs)| {
+            runs.iter().any(|run| prefixes_the_handshake(run))
                 || shell_commands(line)
                     .iter()
                     .any(|(words, _)| exports_the_handshake(words))
@@ -2609,6 +2614,16 @@ mod handshake {
             counted,
             Vec::<&str>::new(),
             "the prefix is on a different command, so the cargo test runs without it"
+        );
+
+        // ACCEPTANCE: the armed run is found wherever it sits on the
+        // line, not only when it is the first qualifying command.
+        let second =
+            "cargo test --locked --lib; EXPECT_OVERFLOW_CHECKS=1 cargo test --locked --lib\n";
+        assert_eq!(
+            debug_runs_that_prove_the_build_traps(second).len(),
+            1,
+            "the second cargo test carries the prefix and its status is read"
         );
 
         let exported = "export EXPECT_OVERFLOW_CHECKS=1; cargo test --locked --lib\n";
