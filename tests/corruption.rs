@@ -1175,3 +1175,43 @@ fn a_differencing_image_with_its_required_parent_locator_is_refused_as_differenc
         Err(e) => panic!("a differencing image gave {e:?}"),
     }
 }
+
+/// A log region that exhausts discovery's checksum budget is refused at
+/// open, not treated as a log with nothing to replay (#73).
+///
+/// Every slot here is a bad-checksum entry header claiming to reach the
+/// end of the region, under the header's live `log_guid`. Discovery runs
+/// out of budget partway through, and slots after that point were refused
+/// without being examined -- a committed entry among them was dropped
+/// from the chain, and `open` went on as though the log were empty.
+#[test]
+fn a_log_region_that_exhausts_discovery_is_refused_at_open() {
+    let path = tmp_path("log_budget_exhausted");
+    build_big_vhdx(&path, &pattern_block(3));
+    let log_guid = [0x5Au8; 16];
+    let mut f = open_file_rw(&path);
+    f.seek(SeekFrom::Start(HEADER1_OFFSET)).unwrap();
+    f.write_all(&encode_header(1, log_guid, BIG_LOG_LENGTH, BIG_LOG_OFFSET))
+        .unwrap();
+    let region = BIG_LOG_LENGTH as usize;
+    let mut log = vec![0u8; region];
+    for pos in (0..region).step_by(4096) {
+        log[pos..pos + 4].copy_from_slice(b"loge");
+        log[pos + 8..pos + 12].copy_from_slice(&((region - pos) as u32).to_le_bytes());
+        log[pos + 32..pos + 48].copy_from_slice(&log_guid);
+    }
+    f.seek(SeekFrom::Start(BIG_LOG_OFFSET)).unwrap();
+    f.write_all(&log).unwrap();
+    f.flush().unwrap();
+    drop(f);
+
+    match VhdxReader::open(&path) {
+        Err(Error::Corrupt(m)) => assert!(
+            m.contains("may not have been examined"),
+            "refused, but not for the budget: {m}"
+        ),
+        Ok(_) => panic!("a log discovery could not finish examining opened as clean"),
+        Err(e) => panic!("got {e:?}"),
+    }
+    let _ = std::fs::remove_file(&path);
+}
