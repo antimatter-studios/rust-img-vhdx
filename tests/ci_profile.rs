@@ -104,17 +104,44 @@ fn read_or_panic(path: &Path) -> String {
 /// It is shell, not YAML: [`parse_workflow`] has already removed the
 /// workflow's own comments, and what reaches here is the inside of a
 /// `run:` block, where `#` is the shell's comment character.
-fn command_lines(script: &str) -> Vec<&str> {
-    script
-        .lines()
-        .map(str::trim_start)
-        .map(|line| match comment_start(line) {
+///
+/// A LINE ENDING IN AN UNESCAPED BACKSLASH CONTINUES onto the next, and
+/// the two are one line to the shell. Kept apart, `false && echo x \`
+/// then `&& export …` read as an unconditional export on its own line
+/// (Greptile on #93); `bash -c` shows the handshake 0 times. A comment
+/// is cut first, because a backslash inside one continues nothing.
+fn command_lines(script: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut pending: Option<String> = None;
+    for line in script.lines().map(str::trim_start) {
+        let line = match comment_start(line) {
             Some(at) => &line[..at],
             None => line,
-        })
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .collect()
+        };
+        let trailing = line.len() - line.trim_end_matches('\\').len();
+        let (text, continues) = if trailing % 2 == 1 {
+            (&line[..line.len() - 1], true)
+        } else {
+            (line, false)
+        };
+        let joined = match pending.take() {
+            Some(mut head) => {
+                head.push(' ');
+                head.push_str(text.trim());
+                head
+            }
+            None => text.trim().to_string(),
+        };
+        if continues {
+            pending = Some(joined);
+        } else if !joined.trim().is_empty() {
+            out.push(joined.trim().to_string());
+        }
+    }
+    if let Some(rest) = pending.filter(|rest| !rest.trim().is_empty()) {
+        out.push(rest.trim().to_string());
+    }
+    out
 }
 
 /// Where a shell comment begins on a line, if it does.
@@ -3107,6 +3134,12 @@ mod gating {
             // before (#93): `false &&` then `export …` shows it 0 times.
             "      - run: |\n          test -f x &&\n            export EXPECT_OVERFLOW_CHECKS=1\n          cargo test --locked --lib\n",
             "      - run: |\n          true ||\n            export EXPECT_OVERFLOW_CHECKS=1\n          cargo test --locked --lib\n",
+            // The same list continued by a trailing backslash, which
+            // joins the two physical lines into one (Greptile on #93):
+            // each shows the handshake 0 times.
+            "      - run: |\n          test -f x && echo y \\\n            && export EXPECT_OVERFLOW_CHECKS=1\n          cargo test --locked --lib\n",
+            "      - run: |\n          test -f x && \\\n            export EXPECT_OVERFLOW_CHECKS=1\n          cargo test --locked --lib\n",
+            "      - run: |\n          true \\\n            || export EXPECT_OVERFLOW_CHECKS=1\n          cargo test --locked --lib\n",
         ]
         .into_iter()
         .filter(|block| {
@@ -3130,6 +3163,8 @@ mod gating {
             "      - run: |\n          export EXPECT_OVERFLOW_CHECKS=1\n          cargo test --locked --lib\n",
             "      - run: export EXPECT_OVERFLOW_CHECKS=1; cargo test --locked --lib\n",
             "      - run: export EXPECT_OVERFLOW_CHECKS=1 && cargo test --locked --lib\n",
+            // A continued line that is not a list still exports: 1 time.
+            "      - run: |\n          echo a \\\n            b\n          export EXPECT_OVERFLOW_CHECKS=1\n          cargo test --locked --lib\n",
         ] {
             let yaml = GATING.replace(
                 "      - run: EXPECT_OVERFLOW_CHECKS=1 cargo test --locked --lib\n",
