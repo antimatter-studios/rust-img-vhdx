@@ -878,46 +878,71 @@ fn runs_with_overflow_checks(script: &str) -> Vec<String> {
         .collect()
 }
 
-/// [`runs_with_overflow_checks`], keeping the words of EVERY `cargo test`
-/// command that qualified each line -- a `NAME=value` prefix has to be
-/// on one of them to reach it. See [`prefixes_the_handshake`]. Every
-/// one, not the first: `cargo test …; EXPECT_OVERFLOW_CHECKS=1 cargo
-/// test …` has its armed run second.
-fn qualifying_runs(script: &str) -> Vec<(String, Vec<Vec<String>>)> {
+/// [`runs_with_overflow_checks`], keeping for EVERY `cargo test` that
+/// qualified each line whether the handshake reaches it.
+///
+/// Every one, not the first: `cargo test …; EXPECT_OVERFLOW_CHECKS=1
+/// cargo test …` has its armed run second.
+///
+/// IN ORDER, because an export reaches only what runs after it. The
+/// question used to be whether ANY command exported the handshake, so
+/// `cargo test --locked --lib; export EXPECT_OVERFLOW_CHECKS=1` armed a
+/// run that had already finished without it (#91). A run is reached by
+/// a `NAME=value` prefix on the run itself ([`prefixes_the_handshake`]),
+/// or by an export ([`exports_the_handshake`]) that ran before it in the
+/// shell itself -- see [`export_persists`].
+fn qualifying_runs(script: &str) -> Vec<(String, Vec<bool>)> {
     let lines = command_lines(script);
     if lines.iter().any(|line| disables_errexit(line)) {
         return Vec::new();
     }
     let mut out = Vec::new();
+    let mut exported = false;
     let last_line = lines.len().saturating_sub(1);
     for (line_index, line) in lines.iter().enumerate() {
-        if line.contains("--release") || line.contains("--profile") {
-            continue;
-        }
-        if line.contains("CARGO_PROFILE_") {
-            continue;
-        }
+        // A disqualified line still runs, and may still export.
+        let disqualified = line.contains("--release")
+            || line.contains("--profile")
+            || line.contains("CARGO_PROFILE_");
         let commands = shell_commands(line);
         let mut qualifying = Vec::new();
         for (index, (words, _)) in commands.iter().enumerate() {
-            let Some(arguments) = cargo_test_arguments(words) else {
-                continue;
-            };
-            if omits_the_library_unit_tests(&arguments) {
-                continue;
+            let qualifies = !disqualified
+                && cargo_test_arguments(words)
+                    .is_some_and(|arguments| !omits_the_library_unit_tests(&arguments))
+                // Whether an `&&` chain's failure reaches the step
+                // depends on there being nothing after it -- see
+                // `status_is_read`.
+                && status_is_read(&commands, index, line_index == last_line);
+            if qualifies {
+                qualifying.push(exported || prefixes_the_handshake(words));
             }
-            // Whether an `&&` chain's failure reaches the step depends
-            // on there being nothing after it -- see `status_is_read`.
-            if !status_is_read(&commands, index, line_index == last_line) {
-                continue;
+            if export_persists(&commands, index) {
+                exported = true;
             }
-            qualifying.push(words.clone());
         }
         if !qualifying.is_empty() {
             out.push((line.to_string(), qualifying));
         }
     }
     out
+}
+
+/// Whether `commands[index]` exports the handshake into the shell that
+/// runs the commands after it.
+///
+/// Not when it is piped, backgrounded or substituted: each of those runs
+/// in a subshell, and the export dies with it. And not when it is the
+/// conditional arm of an `&&`/`||` list, which may not run at all.
+/// MEASURED with `bash -c`, counting the handshake in `env` afterwards:
+/// `export …; env` 1, `export … | cat; env` 0, `export … & wait; env` 0,
+/// `echo $(export …); env` 0.
+fn export_persists(commands: &[(Vec<String>, Sep)], index: usize) -> bool {
+    let (words, sep) = &commands[index];
+    let conditional = index > 0 && matches!(commands[index - 1].1, Sep::And | Sep::Or);
+    exports_the_handshake(words)
+        && matches!(sep, Sep::Semi | Sep::End | Sep::And | Sep::Or)
+        && !conditional
 }
 
 /// WHAT ELSE DECIDES WHETHER A STEP GATES.
@@ -1271,12 +1296,14 @@ fn scan_steps(workflow: &str, gating: bool, select: fn(&str) -> Vec<String>) -> 
 /// Only an export or the `env:` mapping reaches the whole step; a
 /// prefix is judged on the run it prefixes, by
 /// [`debug_runs_that_prove_the_build_traps`].
+///
+/// NOR DOES AN EXPORT, ANY LONGER. It reaches only the commands after
+/// it, so `cargo test …; export EXPECT_OVERFLOW_CHECKS=1` armed a run
+/// that never received it (#91). Only the `env:` mapping reaches the
+/// whole step; everything in the script is judged in order by
+/// [`qualifying_runs`].
 fn step_declares_the_handshake(step: &Step) -> bool {
-    command_lines(&step.run).iter().any(|line| {
-        shell_commands(line)
-            .iter()
-            .any(|(words, _)| exports_the_handshake(words))
-    }) || step.env.iter().any(|entry| entry == HANDSHAKE)
+    step.env.iter().any(|entry| entry == HANDSHAKE)
 }
 
 /// The one spelling of the handshake that this file is looking for.
@@ -1469,15 +1496,13 @@ fn gating_runs_that_prove_the_build_traps(workflow: &str) -> Vec<String> {
 /// `EXPECT_OVERFLOW_CHECKS=1 true && cargo test --locked --lib` hands
 /// the run nothing, and asking whether ANY command on the line assigned
 /// it said yes. An export on the line still counts.
+///
+/// An export counts only for runs after it (#91): see
+/// [`qualifying_runs`].
 fn debug_runs_that_prove_the_build_traps(script: &str) -> Vec<String> {
     qualifying_runs(script)
         .into_iter()
-        .filter(|(line, runs)| {
-            runs.iter().any(|run| prefixes_the_handshake(run))
-                || shell_commands(line)
-                    .iter()
-                    .any(|(words, _)| exports_the_handshake(words))
-        })
+        .filter(|(_, armed)| armed.iter().any(|reached| *reached))
         .map(|(line, _)| line)
         .collect()
 }
@@ -3021,6 +3046,66 @@ mod gating {
             1,
             "an export reaches every later command"
         );
+    }
+
+    /// AN EXPORT ARMS ONLY THE COMMANDS AFTER IT.
+    ///
+    /// Step-level arming asked whether ANY command in the step exported
+    /// the handshake, so an export after the `cargo test` armed a run
+    /// that had already finished without it. Found by Greptile on #90.
+    /// An export in a pipeline, in the background or inside a command
+    /// substitution runs in a subshell and reaches nothing after it.
+    /// Measured with `bash -c`, counting the handshake in `env` at the
+    /// point the test would run: export after 0 (both spellings),
+    /// `export … | cat` 0, `export … & wait` 0, `echo $(export …)` 0,
+    /// `false && export …` 0.
+    #[test]
+    fn an_export_that_does_not_reach_the_run_does_not_arm_it() {
+        let armed: Vec<&str> = [
+            "      - run: |\n          cargo test --locked --lib\n          export EXPECT_OVERFLOW_CHECKS=1\n",
+            "      - run: cargo test --locked --lib; export EXPECT_OVERFLOW_CHECKS=1\n",
+            "      - run: |\n          export EXPECT_OVERFLOW_CHECKS=1 | cat\n          cargo test --locked --lib\n",
+            "      - run: |\n          export EXPECT_OVERFLOW_CHECKS=1 &\n          cargo test --locked --lib\n",
+            "      - run: |\n          echo $(export EXPECT_OVERFLOW_CHECKS=1)\n          cargo test --locked --lib\n",
+            // The conditional arm of a list may not run: `false &&
+            // export …; env` shows it 0 times. Refused whatever the
+            // condition, which is over-strict when it succeeds -- the
+            // safe direction, and the `env:` mapping is the spelling.
+            "      - run: |\n          test -f x && export EXPECT_OVERFLOW_CHECKS=1\n          cargo test --locked --lib\n",
+        ]
+        .into_iter()
+        .filter(|block| {
+            let yaml = GATING.replace(
+                "      - run: EXPECT_OVERFLOW_CHECKS=1 cargo test --locked --lib\n",
+                block,
+            );
+            assert_ne!(yaml, GATING, "the fixture must replace the control step");
+            !gating_runs_that_prove_the_build_traps(&yaml).is_empty()
+        })
+        .collect();
+        assert_eq!(
+            armed,
+            Vec::<&str>::new(),
+            "the export does not reach the cargo test, so the run gets no handshake"
+        );
+
+        // ACCEPTANCE: an export before the run, on its line or an
+        // earlier one, still arms it.
+        for block in [
+            "      - run: |\n          export EXPECT_OVERFLOW_CHECKS=1\n          cargo test --locked --lib\n",
+            "      - run: export EXPECT_OVERFLOW_CHECKS=1; cargo test --locked --lib\n",
+            "      - run: export EXPECT_OVERFLOW_CHECKS=1 && cargo test --locked --lib\n",
+        ] {
+            let yaml = GATING.replace(
+                "      - run: EXPECT_OVERFLOW_CHECKS=1 cargo test --locked --lib\n",
+                block,
+            );
+            assert_eq!(
+                gating_runs_that_prove_the_build_traps(&yaml).len(),
+                1,
+                "the export precedes the run: {block:?}"
+            );
+        }
     }
 
     /// A NAME THE SHELL WOULD REJECT IS NOT AN ASSIGNMENT.
