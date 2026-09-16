@@ -965,6 +965,7 @@ fn a_differencing_image_is_refused_at_open() {
         ),
         Err(e) => panic!("a differencing image gave {e:?}"),
     }
+    let _ = std::fs::remove_file(&path);
 }
 
 /// The flags word is read rather than assumed: bit 0 is a different
@@ -983,4 +984,6 @@ fn the_leave_blocks_allocated_flag_is_not_a_parent() {
     assert!(!r.has_parent());
     let mut buf = [0u8; 16];
     r.read_at(0, &mut buf).expect("and the image still reads");
+    drop(r);
+    let _ = std::fs::remove_file(&path);
 }
