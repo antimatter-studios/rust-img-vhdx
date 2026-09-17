@@ -1013,6 +1013,81 @@ fn a_journalled_write_after_replay_rotates_off_the_header_replay_wrote() {
     let _ = std::fs::remove_file(&path);
 }
 
+/// Counts the bytes written into the log region.
+struct CountsLogWrites {
+    inner: fs_core::FileDevice,
+    log_bytes: std::sync::atomic::AtomicU64,
+}
+
+impl fs_core::BlockRead for CountsLogWrites {
+    fn read_at(&self, offset: u64, buf: &mut [u8]) -> fs_core::Result<()> {
+        self.inner.read_at(offset, buf)
+    }
+    fn size_bytes(&self) -> u64 {
+        fs_core::BlockRead::size_bytes(&self.inner)
+    }
+}
+
+impl fs_core::BlockDevice for CountsLogWrites {
+    fn write_at(&self, offset: u64, buf: &[u8]) -> fs_core::Result<()> {
+        let log = BIG_LOG_OFFSET..BIG_LOG_OFFSET + u64::from(BIG_LOG_LENGTH);
+        let start = offset.max(log.start);
+        let end = (offset + buf.len() as u64).min(log.end);
+        if start < end {
+            self.log_bytes
+                .fetch_add(end - start, std::sync::atomic::Ordering::SeqCst);
+        }
+        self.inner.write_at(offset, buf)
+    }
+    fn flush(&self) -> fs_core::Result<()> {
+        self.inner.flush()
+    }
+    fn is_writable(&self) -> bool {
+        true
+    }
+}
+
+/// A journalled write records its entry and nothing else in the log region
+/// (#45). It used to zero the whole region first: 1 MiB on this fixture,
+/// and up to the 4 GiB a header may declare, for one 8 KiB entry on every
+/// allocating write. Two allocations here, then the image reads back.
+#[test]
+fn a_journalled_write_writes_its_entry_not_the_whole_log_region() {
+    let path = tmp_path("log_write_cost");
+    build_big_vhdx(&path, &pattern_block(8));
+    let dev = std::sync::Arc::new(CountsLogWrites {
+        inner: fs_core::FileDevice::open_rw(&path).unwrap(),
+        log_bytes: std::sync::atomic::AtomicU64::new(0),
+    });
+    let w = VhdxReader::open_rw_on_device(dev.clone()).expect("open read-write");
+    w.write_at(u64::from(BIG_BLOCK_SIZE) + 100, &[0xD1; 3000])
+        .expect("first allocating write");
+    w.write_at(2 * u64::from(BIG_BLOCK_SIZE) + 5000, &[0xD2; 3000])
+        .expect("second allocating write");
+    drop(w);
+
+    let written = dev.log_bytes.load(std::sync::atomic::Ordering::SeqCst);
+    assert!(
+        written > 0,
+        "fixture: the writes were not journalled at all, so this measures nothing"
+    );
+    assert!(
+        written <= 2 * 8192,
+        "two journalled writes put {written} bytes into the log region, more than their two \
+         8 KiB entries"
+    );
+
+    let r = VhdxReader::open(&path).expect("the image reopens");
+    let mut got = [0u8; 3000];
+    r.read_at(u64::from(BIG_BLOCK_SIZE) + 100, &mut got)
+        .unwrap();
+    assert_eq!(got, [0xD1; 3000]);
+    r.read_at(2 * u64::from(BIG_BLOCK_SIZE) + 5000, &mut got)
+        .unwrap();
+    assert_eq!(got, [0xD2; 3000]);
+    let _ = std::fs::remove_file(&path);
+}
+
 /// A device that silently drops every write after the first `budget`, as
 /// power loss would.
 struct CutAfter {

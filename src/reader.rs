@@ -1032,17 +1032,22 @@ impl VhdxReader {
             // Entry doesn't fit — skip journaling.
             return Ok(());
         }
-        // Clear the whole log region first, then splice at its start.
+        // Splice at the start of the region, WITHOUT ERASING IT FIRST (#45).
         //
-        // The clear is what makes this correct: it guarantees the entry
-        // written below is the only one in the region, so it is the
-        // first entry of its own chain — which is exactly what the
-        // `tail: 0` passed to `encode_entry` above claims, and what
-        // `collect_replay_chain` anchors its walk on. Position itself
-        // is a write-amplification question; the invariant replay
-        // depends on is that a chain's first entry really is where its
-        // `tail` says it is.
-        zero_log_region(&self.dev, header.log_offset, header.log_length)?;
+        // Replay needs this entry to be the whole of its chain and to sit
+        // where its `tail: 0` says. Both hold without a clear. The chain is
+        // the entries carrying the log GUID the header names, and this
+        // write names a GUID of its own (`new_log_guid`, stirred above), so
+        // nothing else in the region belongs to it; and every entry this
+        // writer makes is this one size at this one offset, so the
+        // previous one is overwritten whole rather than left half-visible.
+        // A torn overwrite leaves a slot that fails its checksum under a
+        // header still naming the previous GUID, whose write has already
+        // landed in place.
+        //
+        // The clear used to write `log_length` zero bytes -- 1 MiB on a
+        // qemu-img image, up to 4 GiB as the header allows -- to record
+        // one 8 KiB entry, on every allocating write.
         self.dev_write(header.log_offset, &entry)?;
         self.dev_flush()?;
 
