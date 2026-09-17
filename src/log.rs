@@ -229,21 +229,26 @@ fn parse_log_entry(
     }
     *checksum_budget -= entry_length;
 
-    let wrapped;
-    let entry_bytes: &[u8] = if pos + entry_length <= log_bytes.len() {
-        &log_bytes[pos..pos + entry_length]
-    } else {
-        wrapped = [
-            &log_bytes[pos..],
-            &log_bytes[..pos + entry_length - log_bytes.len()],
-        ]
-        .concat();
-        &wrapped
-    };
-    let stored_crc = read_u32_le(entry_bytes, 4);
-    if stored_crc != entry_crc(entry_bytes) {
+    // A WRAPPED ENTRY IS CHECKSUMMED IN PLACE, AND COPIED ONLY ONCE IT
+    // PASSES. Its two halves are contiguous in the checksum's eyes, so
+    // the CRC runs over one then the other; assembling them first would
+    // allocate up to the region's length for every wrapped slot a
+    // damaged image offers before a byte of it had been validated.
+    let tail_len = (pos + entry_length).saturating_sub(log_bytes.len());
+    let first = &log_bytes[pos..pos + entry_length - tail_len];
+    let second = &log_bytes[..tail_len];
+    let stored_crc = read_u32_le(first, 4);
+    let computed = crc32c::crc32c_append(entry_crc(first), second);
+    if stored_crc != computed {
         return Err(EntryReject::Corrupt);
     }
+    let wrapped;
+    let entry_bytes: &[u8] = if tail_len == 0 {
+        first
+    } else {
+        wrapped = [first, second].concat();
+        &wrapped
+    };
 
     let tail = read_u32_le(entry_bytes, 12);
     let sequence_number = read_u64_le(entry_bytes, 16);
