@@ -7,7 +7,7 @@
 
 mod common;
 
-use std::io::{Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 
 use common::*;
 use vhdx::VhdxReader;
@@ -780,6 +780,96 @@ fn inject_dirty_log(path: &std::path::Path, log_guid: [u8; 16]) {
     f.seek(SeekFrom::Start(HEADER2_OFFSET)).unwrap();
     f.write_all(&hdr).unwrap();
     f.flush().unwrap();
+}
+
+/// A replay that grows the file leaves the block it created readable (#42).
+///
+/// The reader took the file's length once, at open, and `FileDevice` never
+/// re-reads it, so every bounds check after a replay still used the length
+/// from before it. A log that allocates a block past the old end -- the
+/// post-crash mid-allocation shape `apply_chain` is written to accept --
+/// then left that block refused as "BAT entry names an offset past the
+/// file", on a file that was fine.
+///
+/// The chain here writes block 1's payload sector at the old end of the
+/// file and points block 1's BAT entry there, as an allocation that
+/// crashed after logging would.
+#[test]
+fn a_block_a_replay_allocated_past_the_old_end_reads_back() {
+    let path = tmp_path("replay_grows");
+    build_big_vhdx(&path, &pattern_block(6));
+    let log_guid = [0x42u8; 16];
+
+    let tail = BIG_TOTAL_FILE_SIZE;
+    let mut bat_sector = vec![0u8; 4096];
+    {
+        let mut f = std::fs::File::open(&path).unwrap();
+        f.seek(SeekFrom::Start(BIG_BAT_OFFSET)).unwrap();
+        f.read_exact(&mut bat_sector).unwrap();
+    }
+    // Block 1: PAYLOAD_BLOCK_FULLY_PRESENT (6) at the old end, in MiB.
+    let entry_1 = ((tail / ONE_MIB) << 20) | 6;
+    bat_sector[8..16].copy_from_slice(&entry_1.to_le_bytes());
+    let payload = vec![0xABu8; 4096];
+    let grown_to = tail + 2 * 4096;
+    let entry = vhdx::log::encode_entry(
+        2,
+        0,
+        &log_guid,
+        grown_to,
+        grown_to,
+        &[
+            vhdx::log::PendingWrite {
+                file_offset: tail + 4096,
+                sector: payload.clone(),
+            },
+            vhdx::log::PendingWrite {
+                file_offset: BIG_BAT_OFFSET,
+                sector: bat_sector,
+            },
+        ],
+    );
+    {
+        let mut f = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        f.seek(SeekFrom::Start(BIG_LOG_OFFSET)).unwrap();
+        f.write_all(&entry).unwrap();
+        let mut hdr = vec![0u8; HEADER_SIZE];
+        hdr[0..4].copy_from_slice(b"head");
+        hdr[8..16].copy_from_slice(&5u64.to_le_bytes());
+        hdr[48..64].copy_from_slice(&log_guid);
+        hdr[66..68].copy_from_slice(&1u16.to_le_bytes());
+        hdr[68..72].copy_from_slice(&BIG_LOG_LENGTH.to_le_bytes());
+        hdr[72..80].copy_from_slice(&BIG_LOG_OFFSET.to_le_bytes());
+        let crc = {
+            let mut tmp = hdr.clone();
+            tmp[4..8].fill(0);
+            crc32c::crc32c(&tmp)
+        };
+        hdr[4..8].copy_from_slice(&crc.to_le_bytes());
+        f.seek(SeekFrom::Start(HEADER2_OFFSET)).unwrap();
+        f.write_all(&hdr).unwrap();
+    }
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().len(),
+        tail,
+        "fixture: the block lies past the file's end until the replay"
+    );
+
+    let r = VhdxReader::open(&path).expect("open replays the chain");
+    assert!(
+        std::fs::metadata(&path).unwrap().len() >= grown_to,
+        "fixture: the replay grew the file"
+    );
+    let mut got = vec![0u8; 4096];
+    r.read_at(BIG_BLOCK_SIZE as u64 + 4096, &mut got)
+        .expect("the block the replay allocated reads, in the same open");
+    assert_eq!(got, payload);
+    drop(r);
+    let _ = std::fs::remove_file(&path);
 }
 
 /// The first journalled write after a replay must rotate *off* the

@@ -310,7 +310,7 @@ impl VhdxReader {
     /// device can absorb log replay (true when the device is RW even
     /// if the reader was opened RO).
     fn open_inner(dev: Arc<dyn BlockDevice>, writable: bool, replay_capable: bool) -> Result<Self> {
-        let dev_size = dev.size_bytes();
+        let mut dev_size = dev.size_bytes();
 
         // 1. File identifier.
         let mut sig = [0u8; 8];
@@ -421,6 +421,14 @@ impl VhdxReader {
                 }
                 apply_chain(&dev, &chain)?;
                 replayed = true;
+                // THE REPLAY MAY HAVE GROWN THE FILE (#42), and every
+                // bounds check from here on -- the region table, the
+                // metadata, the BAT and each read's `host_offset` -- is
+                // against `dev_size`. `FileDevice::size_bytes` is the
+                // length recorded at open and never re-read, so asking it
+                // again would return the same stale number. What the
+                // replay wrote is known exactly: its descriptors.
+                dev_size = dev_size.max(crate::log::chain_extent(&chain));
             }
         }
 

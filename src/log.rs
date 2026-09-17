@@ -559,6 +559,31 @@ fn allowed_extent(current: u64, chain: &[LogEntry]) -> u64 {
     current.max(claimed)
 }
 
+/// The highest byte `chain`'s descriptors write, as an offset one past it.
+///
+/// What a replay of the chain leaves the file at least as long as, since
+/// a write past the end grows it. Saturating: `apply_chain` has already
+/// refused a descriptor whose end overflows before this is asked.
+pub(crate) fn chain_extent(chain: &[LogEntry]) -> u64 {
+    chain
+        .iter()
+        .flat_map(|entry| entry.descriptors.iter())
+        .map(|d| match d {
+            Descriptor::Zero {
+                zero_length,
+                file_offset,
+                ..
+            } => file_offset.saturating_add(*zero_length),
+            Descriptor::Data {
+                file_offset,
+                sector,
+                ..
+            } => file_offset.saturating_add(sector.len() as u64),
+        })
+        .max()
+        .unwrap_or(0)
+}
+
 pub fn apply_chain(dev: &Arc<dyn BlockDevice>, chain: &[LogEntry]) -> Result<()> {
     // WHERE EACH DESCRIPTOR LANDS, BEFORE ANY OF THEM LAND.
     //
