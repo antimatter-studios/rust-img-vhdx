@@ -64,7 +64,8 @@
 //! is a state that did exist.
 //!
 //! The region is circular, so a chain whose entries run off the end of
-//! it is followed round to offset 0 rather than cut short there.
+//! it is followed round to offset 0 rather than cut short there, and an
+//! entry whose own bytes cross the end is read on from offset 0.
 
 use crate::endian::{read_u32_le, read_u64_le};
 use crate::error::{Error, Result};
@@ -179,9 +180,15 @@ fn parse_log_entry(
         return Err(EntryReject::Empty);
     }
     let entry_length = read_u32_le(head, 8) as usize;
+    // AN ENTRY MAY RUN PAST THE END OF THE REGION AND ON FROM OFFSET 0
+    // (#47). The region is circular, and a writer that reaches its end
+    // mid-entry carries on at the start, as QEMU's reader does sector by
+    // sector. Refusing such an entry as corrupt ended the chain before
+    // it, and `open` then replayed the prefix and erased the region still
+    // holding it. What an entry cannot do is be longer than the region.
     if entry_length < LOG_SECTOR_SIZE
         || !entry_length.is_multiple_of(LOG_SECTOR_SIZE)
-        || pos + entry_length > log_bytes.len()
+        || entry_length > log_bytes.len()
     {
         return Err(EntryReject::Corrupt);
     }
@@ -222,11 +229,26 @@ fn parse_log_entry(
     }
     *checksum_budget -= entry_length;
 
-    let entry_bytes = &log_bytes[pos..pos + entry_length];
-    let stored_crc = read_u32_le(entry_bytes, 4);
-    if stored_crc != entry_crc(entry_bytes) {
+    // A WRAPPED ENTRY IS CHECKSUMMED IN PLACE, AND COPIED ONLY ONCE IT
+    // PASSES. Its two halves are contiguous in the checksum's eyes, so
+    // the CRC runs over one then the other; assembling them first would
+    // allocate up to the region's length for every wrapped slot a
+    // damaged image offers before a byte of it had been validated.
+    let tail_len = (pos + entry_length).saturating_sub(log_bytes.len());
+    let first = &log_bytes[pos..pos + entry_length - tail_len];
+    let second = &log_bytes[..tail_len];
+    let stored_crc = read_u32_le(first, 4);
+    let computed = crc32c::crc32c_append(entry_crc(first), second);
+    if stored_crc != computed {
         return Err(EntryReject::Corrupt);
     }
+    let wrapped;
+    let entry_bytes: &[u8] = if tail_len == 0 {
+        first
+    } else {
+        wrapped = [first, second].concat();
+        &wrapped
+    };
 
     let tail = read_u32_le(entry_bytes, 12);
     let sequence_number = read_u64_le(entry_bytes, 16);
@@ -487,10 +509,12 @@ fn select_chain(log_bytes: &[u8], found: Vec<LogEntry>) -> Vec<LogEntry> {
             }
         }
         pos += entry.header.entry_length as usize;
-        // The region is circular: an entry ending exactly at its end is
-        // followed by one at offset 0. Sequence numbers rise by one at
-        // every step, so no entry can be reached twice and the walk
-        // terminates whether or not it goes round.
+        // The region is circular: an entry ending at or past its end is
+        // followed by one where it finished, counted from offset 0. No
+        // entry is longer than the region, so one subtraction is enough.
+        // Sequence numbers rise by one at every step, so no entry can be
+        // reached twice and the walk terminates whether or not it goes
+        // round.
         if pos >= log_bytes.len() {
             pos -= log_bytes.len();
         }
@@ -1036,6 +1060,82 @@ mod tests {
 
         let chain = collect_replay_chain(&region, &LIVE_GUID);
         assert_eq!(sequences(&chain), vec![1, 2, 3]);
+    }
+
+    /// Write `entry` into the circular region at `off`, running round to
+    /// offset 0 where it passes the end.
+    fn splice_wrapping(region: &mut [u8], off: usize, entry: &[u8]) {
+        for (i, b) in entry.iter().enumerate() {
+            let at = (off + i) % region.len();
+            region[at] = *b;
+        }
+    }
+
+    /// AN ENTRY WHOSE BYTES CROSS THE END OF THE REGION (#47). QEMU's
+    /// reader advances sector by sector modulo the log length, so an entry
+    /// may begin before the end and finish at offset 0. Refusing it as
+    /// corrupt stopped the chain before it, after which `open` replayed the
+    /// prefix and erased the region holding the entry it declined to read.
+    ///
+    /// Sequence 1 fills the last whole slot, sequence 2 is 8 KiB starting
+    /// 4 KiB before the end, and sequence 3 follows it at 4 KiB.
+    #[test]
+    fn an_entry_straddling_the_end_of_the_region_is_read_whole() {
+        let start = TEST_REGION_LEN - LOG_SECTOR_SIZE - ONE_WRITE_ENTRY_LEN;
+        let mut region = vec![0u8; TEST_REGION_LEN];
+        splice(
+            &mut region,
+            start,
+            &one_write_entry(1, start as u32, &LIVE_GUID),
+        );
+        let straddling = TEST_REGION_LEN - LOG_SECTOR_SIZE;
+        splice_wrapping(
+            &mut region,
+            straddling,
+            &one_write_entry(2, start as u32, &LIVE_GUID),
+        );
+        splice(
+            &mut region,
+            LOG_SECTOR_SIZE,
+            &one_write_entry(3, start as u32, &LIVE_GUID),
+        );
+
+        let chain = collect_replay_chain(&region, &LIVE_GUID);
+        assert_eq!(sequences(&chain), vec![1, 2, 3]);
+        assert_eq!(chain[1].log_offset_in_region, straddling as u64);
+        match &chain[1].descriptors[..] {
+            [Descriptor::Data {
+                file_offset,
+                sector,
+                ..
+            }] => {
+                assert_eq!(*file_offset, target_of(2));
+                assert_eq!(sector, &vec![0x12u8; LOG_SECTOR_SIZE]);
+            }
+            other => panic!("the straddling entry's descriptors: {other:?}"),
+        }
+    }
+
+    /// The control for the one above: the same straddling entry with one
+    /// byte of its wrapped half flipped fails its checksum, so the chain
+    /// stops before it rather than reading round into anything.
+    #[test]
+    fn a_torn_straddling_entry_ends_the_chain() {
+        let start = TEST_REGION_LEN - LOG_SECTOR_SIZE - ONE_WRITE_ENTRY_LEN;
+        let mut region = vec![0u8; TEST_REGION_LEN];
+        splice(
+            &mut region,
+            start,
+            &one_write_entry(1, start as u32, &LIVE_GUID),
+        );
+        splice_wrapping(
+            &mut region,
+            TEST_REGION_LEN - LOG_SECTOR_SIZE,
+            &one_write_entry(2, start as u32, &LIVE_GUID),
+        );
+        region[100] ^= 0xFF;
+        let chain = collect_replay_chain(&region, &LIVE_GUID);
+        assert_eq!(sequences(&chain), vec![1]);
     }
 
     #[test]
