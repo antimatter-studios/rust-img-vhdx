@@ -1,0 +1,75 @@
+# .github-guard — declarations github-guard reads (see the github-guard skill:
+# https://github.com/antimatter-studios/agent-skills/blob/main/.claude/skills/github-guard/README.md).
+# git-config format: check with `git config -f .github-guard --list`, and
+# double-quote any value containing # or ;.
+
+# Required status checks for main. A declaration beats discovery exactly.
+#
+# Discovery requires checks BY JOB NAME, which is a guess at the PR gate and
+# drifts silently: a renamed job, an added workflow, or any future check
+# reporting under the github-actions app changes what is required without
+# anyone deciding to. Pinning it costs nothing and makes the intent reviewable.
+#
+# WHY THIS FILE EXISTS EVEN THOUGH NOTHING IS WRONG TODAY. The audit in
+# antimatter-studios/diskjockey#197 went looking for required-check lists that
+# had drifted away from the checks CI actually produces. This repository's list
+# had not: the six names below are exactly the six check-runs the latest main
+# commit produced, and exactly the six the latest pull_request check-suite
+# produced, all `success`. Nothing needed correcting. It is declared anyway,
+# because the list currently lives only in the GitHub settings page, and that
+# page has no diff, no reviewer and no history anyone reads. The next job added
+# to ci.yml will not appear in it, and the gap between "CI runs it" and "a PR
+# cannot merge without it" is invisible from both ends. The sibling
+# rust-img-qcow2 is what that looks like after the fact: it produces a sixth
+# check, `test / i686-unknown-linux-gnu`, that nobody ever made required, and
+# the only reason we know is that somebody went and counted. Here the counting
+# is committed, so the next person can read it instead of repeating it.
+#
+# WHAT EACH NAME IS. All six come from .github/workflows/ci.yml, which triggers
+# on `pull_request`, so all six can gate a pull request — a check that only runs
+# on a tag or a schedule must never be declared, because a required check that
+# never reports blocks the branch permanently. release.yml is exactly that and
+# is deliberately absent from this list.
+#
+#   test / ubuntu-latest    the `test` job's matrix legs. Debug profile, so
+#   test / macos-latest     overflow checks are on; this is the run that carries
+#   test / windows-latest   the EXPECT_OVERFLOW_CHECKS handshake that
+#                           tests/ci_profile.rs insists on. Three platforms
+#                           because the byte-level VHDX code is the kind that
+#                           differs by target, and windows-latest is the leg
+#                           most likely to be quietly dropped.
+#   test (release)          the release-profile run. Not redundant beside the
+#                           matrix: release lets an integer overflow wrap where
+#                           debug panics, so a test guarding a wrapping
+#                           computation passes the debug run for the wrong
+#                           reason. See the long comment above the job.
+#   qemu-validation         cross-validates our reader/writer against
+#                           `qemu-img`. The only job that proves we agree with
+#                           an implementation we did not write.
+#   fmt                     `cargo fmt --check`.
+#
+# TWO JOB-NAMING SHAPES IN ONE FILE, AND THE SPELLINGS ARE NOT INTERCHANGEABLE.
+# GitHub reports a check-run under the job's rendered `name:`, and ci.yml uses
+# two different constructions:
+#
+#   name: test / ${{ matrix.os }}   ->  "test / ubuntu-latest"   (our own text,
+#                                       spaces around the slash because we typed
+#                                       them)
+#   test-release:  name: test (release)  ->  "test (release)"    (our own text
+#                                       again; the parentheses are literal, and
+#                                       there is NO slash)
+#
+# Neither is a GitHub convention — both are just the strings in `name:` — which
+# is why they cannot be inferred from each other. Writing `test / release`, or
+# `test (ubuntu-latest)`, or dropping a space to `test/ubuntu-latest`, produces
+# a name nothing will ever report. With enforce_admins on, that is a repository
+# nobody can merge into. If a job is renamed, this file changes in the same
+# commit; github-guard will keep the old name required until the new one has
+# been green on main once, so the rename does not open a window.
+[checks]
+	required = fmt
+	required = qemu-validation
+	required = test / ubuntu-latest
+	required = test / macos-latest
+	required = test / windows-latest
+	required = test (release)
