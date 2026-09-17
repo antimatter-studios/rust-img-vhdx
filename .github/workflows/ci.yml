@@ -46,9 +46,62 @@ jobs:
         # variable: tests/ci_profile.rs reads this file and fails if no
         # `cargo test` in it runs without `--release` while setting this.
         # See #72.
-        run: cargo test --locked --all-targets
+        #
+        # THE OUTPUT IS REDIRECTED AND NOT PIPED, and that is the same
+        # guard's constraint rather than a style choice. The floor below
+        # needs the output in a file, and the obvious `cargo test … |
+        # tee` hands the step `tee`'s exit status -- `tee` always
+        # succeeds, Actions runs a `run:` block as `bash -e` with no
+        # `pipefail`, and the tests could fail with the step green. That
+        # is `a_run_whose_status_is_discarded_does_not_count` in
+        # tests/ci_profile.rs, which refuses the pipe by name. A `>`
+        # redirection leaves the status on `cargo test` itself, where
+        # errexit reads it. The log is printed back immediately after,
+        # and by the `test log` step when the run fails and errexit ends
+        # this one first.
+        #
+        # `shell: bash` because the floor is bash -- the default shell
+        # on this matrix's windows-latest leg is PowerShell, which
+        # shares none of this syntax.
+        shell: bash
+        run: |
+          cargo test --locked --all-targets > "$RUNNER_TEMP/test.log" 2>&1
+          cat "$RUNNER_TEMP/test.log"
+          # A FLOOR, BECAUSE THE FAILURE MODE HERE IS AN ABSENCE.
+          # `cargo test` exits 0 on "0 passed; 0 failed", so a filter
+          # that selects nothing, a build that produced no test
+          # binaries, or a suite list that came out empty all report the
+          # same green as a full run. Only a count tells them apart, and
+          # that is the defect antimatter-studios/diskjockey#197 was
+          # opened about.
+          #
+          # This is the job most able to hide it: it builds
+          # --all-targets on three platforms, so a target that stops
+          # being built on one of them subtracts its tests from that leg
+          # alone, with the other two still green beside it.
+          #
+          # Measured 2026-09-17 on run 35169423886 (CI on main,
+          # caf8dee): 220 executed on each of ubuntu-latest,
+          # macos-latest and windows-latest -- 66 library + 79 + 38 + 14
+          # + 23 integration. Floor 200. It moves up with the suite and
+          # never down.
+          n=$(grep -aoE 'test result: ok\. [0-9]+ passed' "$RUNNER_TEMP/test.log" | awk '{s+=$4} END{print s+0}')
+          echo "tests executed: $n (floor 200)"
+          if [ "$n" -lt 200 ]; then
+              echo "::error::only $n tests executed, floor is 200 -- 220 ran on 2026-09-17 (run 35169423886), and a run that executes less than that stopped early rather than passed"
+              exit 1
+          fi
         env:
           EXPECT_OVERFLOW_CHECKS: "1"
+      # Errexit ends the step above at the `cargo test` line when the
+      # tests fail, so the `cat` never runs and the output would be lost
+      # exactly when it is wanted. This prints it instead. It carries
+      # `if:`, which means tests/ci_profile.rs does not count it as
+      # gating -- correct, it gates nothing and runs no tests.
+      - name: test log
+        if: failure()
+        shell: bash
+        run: cat "$RUNNER_TEMP/test.log" || echo "no test log was written"
       - name: clippy
         run: cargo clippy --locked --all-targets -- -D warnings
 
@@ -85,7 +138,33 @@ jobs:
           toolchain: 1.95.0
       - uses: Swatinem/rust-cache@v2
       - name: test --release
-        run: cargo test --locked --release --all-targets
+        run: |
+          cargo test --locked --release --all-targets > "$RUNNER_TEMP/test.log" 2>&1
+          cat "$RUNNER_TEMP/test.log"
+          # ITS OWN FLOOR, NOT THE MATRIX'S, BECAUSE THIS IS A DIFFERENT
+          # RUN SELECTION. It builds the same targets today and counts
+          # the same 220, but it is a separate `cargo test` in a
+          # separate profile: a release-only build failure, a
+          # `#[cfg(debug_assertions)]` that takes a module out of the
+          # release build, or a future narrowing of this command empties
+          # this run without touching the matrix, and one shared number
+          # would be satisfied by the other job while proving nothing
+          # about this one. See the floor in the `test` job above for
+          # why a green `cargo test` is not evidence on its own, and why
+          # the output is redirected rather than piped.
+          #
+          # Measured 2026-09-17 on run 35169423886 (CI on main,
+          # caf8dee): 220 executed. Floor 200, and it moves up with the
+          # suite.
+          n=$(grep -aoE 'test result: ok\. [0-9]+ passed' "$RUNNER_TEMP/test.log" | awk '{s+=$4} END{print s+0}')
+          echo "tests executed: $n (floor 200)"
+          if [ "$n" -lt 200 ]; then
+              echo "::error::only $n tests executed, floor is 200 -- 220 ran on 2026-09-17 (run 35169423886), and a run that executes less than that stopped early rather than passed"
+              exit 1
+          fi
+      - name: test log
+        if: failure()
+        run: cat "$RUNNER_TEMP/test.log" || echo "no test log was written"
 
   fmt:
     name: fmt
@@ -117,4 +196,31 @@ jobs:
           toolchain: 1.95.0
       - uses: Swatinem/rust-cache@v2
       - name: qemu cross-validation tests
-        run: cargo test --locked --features qemu-validation --test qemu_validation
+        run: |
+          cargo test --locked --features qemu-validation --test qemu_validation > "$RUNNER_TEMP/qemu.log" 2>&1
+          cat "$RUNNER_TEMP/qemu.log"
+          # THE FLOOR THIS REPOSITORY NEEDS MOST, AND THE SMALLEST ONE.
+          # This run is doubly selective -- one integration target named
+          # on the command line, behind a cargo feature -- and both
+          # halves fail open. Rename tests/qemu_validation.rs together
+          # with the `--test qemu_validation` here and the command that
+          # cross-validated 15 images against `qemu-img` runs none,
+          # exits 0, and this job reports the green it reports today.
+          # Take the `qemu-validation` feature off the tests inside the
+          # file and every one of them compiles out to the same effect,
+          # with `qemu-img` still installed above and never called.
+          # Nothing else in CI would notice: no other job builds this
+          # target.
+          #
+          # Measured 2026-09-17 on run 35169423886 (CI on main,
+          # caf8dee): 15 executed. Floor 13 -- a small number, and the
+          # part that matters is that it is not zero.
+          n=$(grep -aoE 'test result: ok\. [0-9]+ passed' "$RUNNER_TEMP/qemu.log" | awk '{s+=$4} END{print s+0}')
+          echo "qemu cross-validation tests executed: $n (floor 13)"
+          if [ "$n" -lt 13 ]; then
+              echo "::error::only $n qemu cross-validation tests executed, floor is 13 -- 15 ran on 2026-09-17 (run 35169423886), and a run that executes less than that stopped early rather than passed"
+              exit 1
+          fi
+      - name: qemu log
+        if: failure()
+        run: cat "$RUNNER_TEMP/qemu.log" || echo "no qemu log was written"
