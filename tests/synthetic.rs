@@ -872,6 +872,79 @@ fn a_block_a_replay_allocated_past_the_old_end_reads_back() {
     let _ = std::fs::remove_file(&path);
 }
 
+/// An allocation journals only its BAT sector, so the block it names is
+/// known from `last_file_offset` and not from any descriptor (Greptile on
+/// #100). A crash after the log and before the block's zeros reached the
+/// file leaves the file short of the block. The replay makes the file that
+/// long, and the block reads as the zeros an unwritten block holds.
+#[test]
+fn a_replayed_allocation_named_only_by_last_file_offset_reads_as_zeros() {
+    let path = tmp_path("replay_last_file_offset");
+    build_big_vhdx(&path, &pattern_block(7));
+    let log_guid = [0x43u8; 16];
+
+    let tail = BIG_TOTAL_FILE_SIZE;
+    let mut bat_sector = vec![0u8; 4096];
+    {
+        let mut f = std::fs::File::open(&path).unwrap();
+        f.seek(SeekFrom::Start(BIG_BAT_OFFSET)).unwrap();
+        f.read_exact(&mut bat_sector).unwrap();
+    }
+    let entry_1 = ((tail / ONE_MIB) << 20) | 6;
+    bat_sector[8..16].copy_from_slice(&entry_1.to_le_bytes());
+    let block_end = tail + u64::from(BIG_BLOCK_SIZE);
+    let entry = vhdx::log::encode_entry(
+        2,
+        0,
+        &log_guid,
+        block_end,
+        block_end,
+        &[vhdx::log::PendingWrite {
+            file_offset: BIG_BAT_OFFSET,
+            sector: bat_sector,
+        }],
+    );
+    {
+        let mut f = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        f.seek(SeekFrom::Start(BIG_LOG_OFFSET)).unwrap();
+        f.write_all(&entry).unwrap();
+        let mut hdr = vec![0u8; HEADER_SIZE];
+        hdr[0..4].copy_from_slice(b"head");
+        hdr[8..16].copy_from_slice(&5u64.to_le_bytes());
+        hdr[48..64].copy_from_slice(&log_guid);
+        hdr[66..68].copy_from_slice(&1u16.to_le_bytes());
+        hdr[68..72].copy_from_slice(&BIG_LOG_LENGTH.to_le_bytes());
+        hdr[72..80].copy_from_slice(&BIG_LOG_OFFSET.to_le_bytes());
+        let crc = {
+            let mut tmp = hdr.clone();
+            tmp[4..8].fill(0);
+            crc32c::crc32c(&tmp)
+        };
+        hdr[4..8].copy_from_slice(&crc.to_le_bytes());
+        f.seek(SeekFrom::Start(HEADER2_OFFSET)).unwrap();
+        f.write_all(&hdr).unwrap();
+    }
+
+    let r = VhdxReader::open(&path).expect("open replays the chain");
+    assert!(
+        std::fs::metadata(&path).unwrap().len() >= block_end,
+        "the replay left the file short of the block its BAT entry names"
+    );
+    let mut got = vec![0xFFu8; 4096];
+    r.read_at(
+        u64::from(BIG_BLOCK_SIZE) + u64::from(BIG_BLOCK_SIZE) - 4096,
+        &mut got,
+    )
+    .expect("the last sector of the recovered block reads, in the same open");
+    assert_eq!(got, vec![0u8; 4096]);
+    drop(r);
+    let _ = std::fs::remove_file(&path);
+}
+
 /// The first journalled write after a replay must rotate *off* the
 /// header the replay wrote, not onto it.
 ///

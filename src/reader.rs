@@ -427,8 +427,9 @@ impl VhdxReader {
                 // against `dev_size`. `FileDevice::size_bytes` is the
                 // length recorded at open and never re-read, so asking it
                 // again would return the same stale number. What the
-                // replay wrote is known exactly: its descriptors.
-                dev_size = dev_size.max(crate::log::chain_extent(&chain));
+                // replay made the file is known exactly: see
+                // `log::replayed_extent`.
+                dev_size = crate::log::replayed_extent(dev_size, &chain);
             }
         }
 

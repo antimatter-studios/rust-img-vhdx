@@ -559,12 +559,24 @@ fn allowed_extent(current: u64, chain: &[LogEntry]) -> u64 {
     current.max(claimed)
 }
 
-/// The highest byte `chain`'s descriptors write, as an offset one past it.
+/// How long the file is once `chain` has been replayed onto a file that
+/// was `current` bytes: the furthest byte a descriptor wrote, or the
+/// chain's `last_file_offset` within the bound [`allowed_extent`] puts on
+/// it, whichever is further.
 ///
-/// What a replay of the chain leaves the file at least as long as, since
-/// a write past the end grows it. Saturating: `apply_chain` has already
-/// refused a descriptor whose end overflows before this is asked.
-pub(crate) fn chain_extent(chain: &[LogEntry]) -> u64 {
+/// Both, because an allocation journals only the BAT sector: the
+/// descriptors end inside the old file while `last_file_offset` records
+/// the end of the block the BAT entry now names (Greptile on #100).
+/// `apply_chain` makes the file that long, so the length this returns is
+/// one the device really has.
+pub(crate) fn replayed_extent(current: u64, chain: &[LogEntry]) -> u64 {
+    allowed_extent(current, chain).max(descriptor_extent(chain))
+}
+
+/// The highest byte `chain`'s descriptors write, as an offset one past it.
+/// Saturating: `apply_chain` has already refused a descriptor whose end
+/// overflows before this is asked.
+fn descriptor_extent(chain: &[LogEntry]) -> u64 {
     chain
         .iter()
         .flat_map(|entry| entry.descriptors.iter())
@@ -676,6 +688,20 @@ pub fn apply_chain(dev: &Arc<dyn BlockDevice>, chain: &[LogEntry]) -> Result<()>
         }
         dev.flush()
             .map_err(|e| Error::LogReplay(format!("flush after entry: {e}")))?;
+    }
+
+    // UP TO `last_file_offset`, as the reference implementation truncates
+    // up after applying. The chain can name a block past every byte a
+    // descriptor wrote -- an allocation logs only the BAT sector -- and a
+    // crash before the block's zeros landed leaves the file short of it.
+    // One zero byte at the last offset makes it that long; everything it
+    // skips over reads as zeros, which is what an unwritten block holds.
+    let written = dev.size_bytes().max(descriptor_extent(chain));
+    let wanted = replayed_extent(dev.size_bytes(), chain);
+    if wanted > written {
+        dev.write_at(wanted - 1, &[0])
+            .and_then(|()| dev.flush())
+            .map_err(|e| Error::LogReplay(format!("extending to last_file_offset: {e}")))?;
     }
     Ok(())
 }
