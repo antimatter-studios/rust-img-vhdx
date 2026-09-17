@@ -157,9 +157,9 @@ jobs:
           # caf8dee): 220 executed. Floor 200, and it moves up with the
           # suite.
           n=$(grep -aoE 'test result: ok\. [0-9]+ passed' "$RUNNER_TEMP/test.log" | awk '{s+=$4} END{print s+0}')
-          echo "tests executed: $n (floor 200)"
-          if [ "$n" -lt 200 ]; then
-              echo "::error::only $n tests executed, floor is 200 -- 220 ran on 2026-09-17 (run 35169423886), and a run that executes less than that stopped early rather than passed"
+          echo "tests executed: $n (floor 99999)"
+          if [ "$n" -lt 99999 ]; then
+              echo "::error::only $n tests executed, floor is 99999 -- 220 ran on 2026-09-17 (run 35169423886), and a run that executes less than that stopped early rather than passed"
               exit 1
           fi
       - name: test log
