@@ -6,6 +6,11 @@ license = "MIT"
 description = "Pure-Rust VHDX (Microsoft VHD's modern successor) reader. Used by Hyper-V and WSL2. Exposes a Rust API and a C ABI suitable for FFI from C/C++/Go/Swift."
 repository = "https://github.com/antimatter-studios/rust-img-vhdx"
 
+# The fuzz crate is its own package, on its own toolchain, and is not
+# part of this one. Without this, `cargo package` and `cargo publish`
+# try to include it and fail on the nightly-only dependency.
+exclude = ["fuzz"]
+
 [lib]
 name = "vhdx"
 crate-type = ["staticlib", "rlib"]
