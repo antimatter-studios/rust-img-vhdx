@@ -7,6 +7,36 @@ never does.
 
 ## [Unreleased]
 
+### Added
+
+- **The region, metadata, BAT and log parsers are fuzzed, on two tiers.**
+  VHDX has more attacker-controlled indirection than any other format in
+  this family: the region table points at the metadata table, which
+  declares the block size and virtual disk size, which the BAT is then
+  indexed with. `fuzz/` holds `image`, `header`, `region_table`,
+  `metadata` and `log`, nightly on a bounded budget;
+  `tests/fuzz_decoders.rs` is the gate, 18,504 deterministic cases in
+  about a second on the stable toolchain.
+
+  The log target is the one worth having most: the log is a structure the
+  format expects to be *partially written*, so it is parsed with a
+  corruption tolerance the other structures do not have. It is fuzzed
+  with a non-zero GUID, because `collect_replay_chain_checked` returns an
+  empty chain immediately for an all-zero one — a target passing zeros
+  would exercise one `if` and stop.
+
+  Each target carries its own case budget. A VHDX is 8 MB before it holds
+  anything, which is the format's floor rather than a choice, so one
+  whole image is committed for the target that must open one and the rest
+  are 64 KiB sections cut from three (#108).
+
+- `Header::log_version` and the `header::LOG_VERSION_V0` constant.
+- `Error::LogNeedsReplay`, for a log that genuinely holds unapplied
+  entries on a device that cannot take them. `Error::ReadOnly` describes
+  the opener; this describes the file, and names the move the caller has
+  — reopen it writable. Both map to `fs_core::Error::ReadOnly` across the
+  `BlockDevice` bridge, so a consumer of that surface sees no change.
+
 ### Fixed
 
 - **A region marked Required whose GUID we do not know is refused.** The
@@ -40,15 +70,6 @@ never does.
   chain. Such images are read by every other tool and were refused here,
   with a message describing the opener rather than the file. The
   capability test now happens after the chain is assembled.
-
-### Added
-
-- `Header::log_version` and the `header::LOG_VERSION_V0` constant.
-- `Error::LogNeedsReplay`, for a log that genuinely holds unapplied
-  entries on a device that cannot take them. `Error::ReadOnly` describes
-  the opener; this describes the file, and names the move the caller has
-  — reopen it writable. Both map to `fs_core::Error::ReadOnly` across the
-  `BlockDevice` bridge, so a consumer of that surface sees no change.
 
 ## [0.3.5] — 2026-09-06
 
