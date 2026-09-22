@@ -57,7 +57,7 @@ impl Header {
             return Err(Error::Corrupt("header signature mismatch"));
         }
         let stored_crc = read_u32_le(bytes, 4);
-        let computed = compute_crc(bytes);
+        let computed = compute_crc(bytes)?;
         if stored_crc != computed {
             return Err(Error::BadChecksum {
                 expected: stored_crc,
@@ -95,11 +95,23 @@ impl Header {
 }
 
 /// Compute the header's CRC-32C with the checksum field zeroed.
-pub fn compute_crc(bytes: &[u8]) -> u32 {
+///
+/// A buffer shorter than a whole header is refused rather than
+/// checksummed (#113). The CRC is defined over exactly 4 KiB, so there
+/// is no honest number to return for fewer bytes than that: padding the
+/// short buffer out would compute the checksum of a header nobody
+/// wrote, and any sentinel `u32` can collide with a real checksum. The
+/// bytes reaching here are untrusted — a truncated image, or a fuzzer —
+/// and refusing them is what the rest of this crate does with input it
+/// cannot make sense of.
+pub fn compute_crc(bytes: &[u8]) -> Result<u32> {
+    if bytes.len() < HEADER_SIZE {
+        return Err(Error::Corrupt("header shorter than 4 KiB"));
+    }
     let mut buf = [0u8; HEADER_SIZE];
     buf.copy_from_slice(&bytes[..HEADER_SIZE]);
     buf[4..8].fill(0);
-    crc32c::crc32c(&buf)
+    Ok(crc32c::crc32c(&buf))
 }
 
 #[cfg(test)]
@@ -119,7 +131,7 @@ mod tests {
         h[66..68].copy_from_slice(&HEADER_VERSION.to_le_bytes());
         h[68..72].copy_from_slice(&(1u32 << 20).to_le_bytes()); // log_length = 1 MiB
         h[72..80].copy_from_slice(&(4u64 << 20).to_le_bytes()); // log_offset = 4 MiB
-        let crc = compute_crc(&h);
+        let crc = compute_crc(&h).expect("the test header is a full 4 KiB");
         h[4..8].copy_from_slice(&crc.to_le_bytes());
         h
     }
@@ -144,7 +156,7 @@ mod tests {
     fn exposes_a_log_version_it_does_not_recognise() {
         let mut h = valid_header(1);
         h[64..66].copy_from_slice(&1u16.to_le_bytes());
-        let crc = compute_crc(&h);
+        let crc = compute_crc(&h).expect("the test header is a full 4 KiB");
         h[4..8].copy_from_slice(&crc.to_le_bytes());
 
         let parsed = Header::parse(&h).expect("parsing is not where an unknown version is judged");
@@ -166,7 +178,7 @@ mod tests {
         h[0..4].copy_from_slice(b"xxxx");
         // Recompute CRC so the failure is attributable to the signature,
         // not a checksum mismatch.
-        let crc = compute_crc(&h);
+        let crc = compute_crc(&h).expect("the test header is a full 4 KiB");
         h[4..8].copy_from_slice(&crc.to_le_bytes());
         let err = Header::parse(&h).unwrap_err();
         assert!(matches!(err, Error::Corrupt(_)), "got {err:?}");
@@ -188,7 +200,7 @@ mod tests {
     fn rejects_unsupported_version() {
         let mut h = valid_header(1);
         h[66..68].copy_from_slice(&2u16.to_le_bytes());
-        let crc = compute_crc(&h);
+        let crc = compute_crc(&h).expect("the test header is a full 4 KiB");
         h[4..8].copy_from_slice(&crc.to_le_bytes());
 
         let err = Header::parse(&h).unwrap_err();
@@ -201,11 +213,37 @@ mod tests {
     #[test]
     fn compute_crc_is_independent_of_stored_checksum_field() {
         let mut h = valid_header(7);
-        let a = compute_crc(&h);
+        let a = compute_crc(&h).expect("the test header is a full 4 KiB");
         // Scribble over the stored checksum field; compute_crc zeroes it
         // internally, so the result must not change.
         h[4..8].copy_from_slice(&0xDEAD_BEEFu32.to_le_bytes());
-        let b = compute_crc(&h);
+        let b = compute_crc(&h).expect("the test header is a full 4 KiB");
         assert_eq!(a, b);
+    }
+
+    /// #113. `compute_crc` sliced `bytes[..HEADER_SIZE]` unconditionally,
+    /// so the function whose whole job is validating untrusted bytes
+    /// panicked on a buffer too short to be a header. The nightly fuzzer
+    /// found it on an empty buffer in its first unattended run; a
+    /// truncated image reaches the same slice through the read path.
+    #[test]
+    fn compute_crc_refuses_an_empty_buffer() {
+        let err = compute_crc(&[]).unwrap_err();
+        assert!(matches!(err, Error::Corrupt(_)), "got {err:?}");
+    }
+
+    /// One byte short is the interesting boundary: the length check has
+    /// to be `<`, not a test for emptiness.
+    #[test]
+    fn compute_crc_refuses_a_buffer_one_byte_short() {
+        let err = compute_crc(&vec![0u8; HEADER_SIZE - 1]).unwrap_err();
+        assert!(matches!(err, Error::Corrupt(_)), "got {err:?}");
+    }
+
+    /// And the exact size still works, so the refusal has not eaten the
+    /// last valid buffer.
+    #[test]
+    fn compute_crc_accepts_an_exactly_sized_buffer() {
+        assert!(compute_crc(&vec![0u8; HEADER_SIZE]).is_ok());
     }
 }

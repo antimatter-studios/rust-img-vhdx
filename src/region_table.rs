@@ -71,7 +71,7 @@ impl RegionTable {
             return Err(Error::Corrupt("region-table signature mismatch"));
         }
         let stored_crc = read_u32_le(bytes, 4);
-        let computed = compute_crc(bytes);
+        let computed = compute_crc(bytes)?;
         if stored_crc != computed {
             return Err(Error::BadChecksum {
                 expected: stored_crc,
@@ -127,11 +127,19 @@ impl RegionTable {
 }
 
 /// CRC-32C of the region-table header with the checksum field zeroed.
-pub fn compute_crc(bytes: &[u8]) -> u32 {
+///
+/// A buffer shorter than a whole region table is refused rather than
+/// checksummed (#113), for the same reason [`crate::header::compute_crc`]
+/// refuses a short header: the CRC is defined over exactly 64 KiB, and
+/// the bytes reaching here are untrusted.
+pub fn compute_crc(bytes: &[u8]) -> Result<u32> {
+    if bytes.len() < REGION_TABLE_SIZE {
+        return Err(Error::Corrupt("region table shorter than 64 KiB"));
+    }
     let mut buf = vec![0u8; REGION_TABLE_SIZE];
     buf.copy_from_slice(&bytes[..REGION_TABLE_SIZE]);
     buf[4..8].fill(0);
-    crc32c::crc32c(&buf)
+    Ok(crc32c::crc32c(&buf))
 }
 
 #[cfg(test)]
@@ -157,7 +165,7 @@ mod tests {
         rt[off + 24..off + 28].copy_from_slice(&(64u32 * 1024).to_le_bytes());
         rt[off + 28..off + 32].copy_from_slice(&0u32.to_le_bytes()); // not required
 
-        let crc = compute_crc(&rt);
+        let crc = compute_crc(&rt).expect("the test region table is a full 64 KiB");
         rt[4..8].copy_from_slice(&crc.to_le_bytes());
         rt
     }
@@ -193,7 +201,7 @@ mod tests {
     fn rejects_bad_signature() {
         let mut rt = valid_region_table();
         rt[0..4].copy_from_slice(b"junk");
-        let crc = compute_crc(&rt);
+        let crc = compute_crc(&rt).expect("the test region table is a full 64 KiB");
         rt[4..8].copy_from_slice(&crc.to_le_bytes());
         let err = RegionTable::parse(&rt).unwrap_err();
         assert!(matches!(err, Error::Corrupt(_)), "got {err:?}");
@@ -214,9 +222,33 @@ mod tests {
     fn rejects_entry_count_above_max() {
         let mut rt = valid_region_table();
         rt[8..12].copy_from_slice(&2048u32.to_le_bytes());
-        let crc = compute_crc(&rt);
+        let crc = compute_crc(&rt).expect("the test region table is a full 64 KiB");
         rt[4..8].copy_from_slice(&crc.to_le_bytes());
         let err = RegionTable::parse(&rt).unwrap_err();
         assert!(matches!(err, Error::Corrupt(_)), "got {err:?}");
+    }
+
+    /// #113, the region table's half of it. Same shape as the header's:
+    /// an unconditional `bytes[..REGION_TABLE_SIZE]` panicked on a
+    /// buffer shorter than a whole table.
+    #[test]
+    fn compute_crc_refuses_an_empty_buffer() {
+        let err = compute_crc(&[]).unwrap_err();
+        assert!(matches!(err, Error::Corrupt(_)), "got {err:?}");
+    }
+
+    /// One byte short is the interesting boundary: the length check has
+    /// to be `<`, not a test for emptiness.
+    #[test]
+    fn compute_crc_refuses_a_buffer_one_byte_short() {
+        let err = compute_crc(&vec![0u8; REGION_TABLE_SIZE - 1]).unwrap_err();
+        assert!(matches!(err, Error::Corrupt(_)), "got {err:?}");
+    }
+
+    /// And the exact size still works, so the refusal has not eaten the
+    /// last valid buffer.
+    #[test]
+    fn compute_crc_accepts_an_exactly_sized_buffer() {
+        assert!(compute_crc(&vec![0u8; REGION_TABLE_SIZE]).is_ok());
     }
 }

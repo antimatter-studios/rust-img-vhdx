@@ -49,7 +49,8 @@ fn patch_header_field(path: &std::path::Path, slot: u64, field_offset: usize, by
     let mut image = std::fs::read(path).unwrap();
     let at = slot as usize;
     image[at + field_offset..at + field_offset + bytes.len()].copy_from_slice(bytes);
-    let crc = vhdx::header::compute_crc(&image[at..at + HEADER_SIZE]);
+    let crc =
+        vhdx::header::compute_crc(&image[at..at + HEADER_SIZE]).expect("a full-size header slot");
     image[at + 4..at + 8].copy_from_slice(&crc.to_le_bytes());
     std::fs::write(path, &image).unwrap();
 }
@@ -275,7 +276,8 @@ fn append_region_entry(path: &std::path::Path, table_offset: u64, guid: [u8; 16]
     image[off + 28..off + 32].copy_from_slice(&u32::from(required).to_le_bytes());
     image[at + 8..at + 12].copy_from_slice(&((count + 1) as u32).to_le_bytes());
     image[at + 4..at + 8].fill(0);
-    let crc = vhdx::region_table::compute_crc(&image[at..at + REGION_TABLE_SIZE]);
+    let crc = vhdx::region_table::compute_crc(&image[at..at + REGION_TABLE_SIZE])
+        .expect("a full-size region table");
     image[at + 4..at + 8].copy_from_slice(&crc.to_le_bytes());
     std::fs::write(path, &image).unwrap();
 }

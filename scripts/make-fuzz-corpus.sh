@@ -115,6 +115,27 @@ for img_name in sorted(os.listdir(work)):
             break
 PY
 
+# A TRUNCATED STRUCTURE IS A SEED IN ITS OWN RIGHT (#113). `compute_crc`
+# in both header.rs and region_table.rs sliced the fixed structure size
+# out of the caller's buffer without checking it was that long, and
+# panicked on anything shorter -- which is what a truncated or corrupt
+# image hands the read path, and what the fuzzer handed it on its first
+# unattended run. These are written here rather than dropped into the
+# corpus by hand because this script begins by deleting the corpus, so a
+# seed it does not know how to rebuild survives exactly until the next
+# rebuild.
+#
+# Empty and one byte short, because those are the two ends of the check:
+# an emptiness test would let 4095 bytes through. The short ones are
+# truncations of the real structures, so what is in them is a header and
+# a region table rather than noise.
+: > "$here/fuzz/corpus/header/truncated-empty.bin"
+: > "$here/fuzz/corpus/region_table/truncated-empty.bin"
+head -c 4095 "$here/fuzz/corpus/header/dynamic-head1.bin" \
+    > "$here/fuzz/corpus/header/truncated-one-byte-short.bin"
+head -c 65535 "$here/fuzz/corpus/region_table/dynamic-region1.bin" \
+    > "$here/fuzz/corpus/region_table/truncated-one-byte-short.bin"
+
 # An empty log is what a cleanly-closed image has, so seed the replay
 # path with something it can actually walk as well: a region of zeros
 # is a legitimate "nothing to replay" and the shortest path through

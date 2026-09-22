@@ -1343,7 +1343,8 @@ pub fn encode_header(h: &Header) -> Vec<u8> {
     buf[66..68].copy_from_slice(&h.version.to_le_bytes());
     buf[68..72].copy_from_slice(&h.log_length.to_le_bytes());
     buf[72..80].copy_from_slice(&h.log_offset.to_le_bytes());
-    let crc = crate::header::compute_crc(&buf);
+    let crc = crate::header::compute_crc(&buf)
+        .expect("encode_header builds the buffer at HEADER_SIZE, so the CRC cannot refuse it");
     buf[4..8].copy_from_slice(&crc.to_le_bytes());
     buf
 }
