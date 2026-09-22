@@ -39,6 +39,31 @@ never does.
 
 ### Fixed
 
+- **`compute_crc` refuses a short buffer instead of panicking, and now
+  returns a `Result`.** *(#113 — BREAKING: `header::compute_crc` and
+  `region_table::compute_crc` return `Result<u32>` rather than `u32`.)*
+  Both sliced the structure's fixed size out of the caller's buffer —
+  `bytes[..HEADER_SIZE]`, `bytes[..REGION_TABLE_SIZE]` — without
+  checking the buffer was that long, so the function whose whole job is
+  validating untrusted bytes panicked on anything shorter. A truncated
+  or corrupt image reaches it through the read path; the nightly fuzzer
+  reached it on an empty buffer within seconds of its first unattended
+  run, on both targets at once.
+
+  Returning `Result` rather than padding the short buffer out, because
+  the CRC is defined over exactly 4 KiB and exactly 64 KiB: there is no
+  honest `u32` to hand back for fewer bytes than that, and any sentinel
+  can collide with a real checksum. The refusal is `Error::Corrupt` with
+  the same wording the two `parse` functions already use for the same
+  condition. Both `parse` paths check the length before they get here,
+  so no image that opened before opens differently now.
+
+  Empty and one-byte-short seeds for both structures are committed to
+  `fuzz/corpus/header` and `fuzz/corpus/region_table`, and
+  `scripts/make-fuzz-corpus.sh` rebuilds them — it deletes the corpus
+  before it writes it, so a seed it does not know how to make survives
+  only until the next rebuild.
+
 - **A region marked Required whose GUID we do not know is refused.** The
   flag was parsed onto `RegionEntry` and read by nothing outside the
   module's own tests, so an image carrying such a region was read as

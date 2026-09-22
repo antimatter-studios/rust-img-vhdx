@@ -175,7 +175,8 @@ fn patch_both_headers_u16(path: &Path, field_offset: usize, value: u16) {
         let at = slot as usize;
         assert_eq!(&bytes[at..at + 4], b"head", "slot {slot} is not a header");
         bytes[at + field_offset..at + field_offset + 2].copy_from_slice(&value.to_le_bytes());
-        let crc = vhdx::header::compute_crc(&bytes[at..at + HEADER_SIZE]);
+        let crc = vhdx::header::compute_crc(&bytes[at..at + HEADER_SIZE])
+            .expect("a full-size header slot");
         bytes[at + 4..at + 8].copy_from_slice(&crc.to_le_bytes());
     }
     std::fs::write(path, &bytes).unwrap();
@@ -269,7 +270,8 @@ fn add_region_entry(path: &Path, guid: [u8; 16], required: bool) {
         bytes[off + 28..off + 32].copy_from_slice(&(if required { 1u32 } else { 0 }).to_le_bytes());
         bytes[at + 8..at + 12].copy_from_slice(&((count + 1) as u32).to_le_bytes());
         bytes[at + 4..at + 8].fill(0);
-        let crc = vhdx::region_table::compute_crc(&bytes[at..at + TABLE_SIZE]);
+        let crc = vhdx::region_table::compute_crc(&bytes[at..at + TABLE_SIZE])
+            .expect("a full-size region table");
         bytes[at + 4..at + 8].copy_from_slice(&crc.to_le_bytes());
     }
     std::fs::write(path, &bytes).unwrap();
@@ -613,7 +615,8 @@ fn patch_both_headers_log_offset(path: &Path, value: u64) {
         assert_eq!(&bytes[at..at + 4], b"head", "slot {slot} is not a header");
         bytes[at + LOG_OFFSET_OFFSET..at + LOG_OFFSET_OFFSET + 8]
             .copy_from_slice(&value.to_le_bytes());
-        let crc = vhdx::header::compute_crc(&bytes[at..at + HEADER_SIZE]);
+        let crc = vhdx::header::compute_crc(&bytes[at..at + HEADER_SIZE])
+            .expect("a full-size header slot");
         bytes[at + 4..at + 8].copy_from_slice(&crc.to_le_bytes());
     }
     std::fs::write(path, &bytes).unwrap();
