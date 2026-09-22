@@ -10,66 +10,79 @@
 # reporting under the github-actions app changes what is required without
 # anyone deciding to. Pinning it costs nothing and makes the intent reviewable.
 #
-# WHY THIS FILE EXISTS EVEN THOUGH NOTHING IS WRONG TODAY. The audit in
-# antimatter-studios/diskjockey#197 went looking for required-check lists that
-# had drifted away from the checks CI actually produces. This repository's list
-# had not: the six names below are exactly the six check-runs the latest main
-# commit produced, and exactly the six the latest pull_request check-suite
-# produced, all `success`. Nothing needed correcting. It is declared anyway,
-# because the list currently lives only in the GitHub settings page, and that
-# page has no diff, no reviewer and no history anyone reads. The next job added
-# to ci.yml will not appear in it, and the gap between "CI runs it" and "a PR
-# cannot merge without it" is invisible from both ends. The sibling
-# rust-img-qcow2 is what that looks like after the fact: it produces a sixth
-# check, `test / i686-unknown-linux-gnu`, that nobody ever made required, and
-# the only reason we know is that somebody went and counted. Here the counting
-# is committed, so the next person can read it instead of repeating it.
+# WHY THIS FILE EXISTS. The audit in antimatter-studios/diskjockey#197 went
+# looking for required-check lists that had drifted away from the checks CI
+# actually produces. This repository's had not: the six names it then declared
+# — `fmt`, `qemu-validation`, `test / ubuntu-latest`, `test / macos-latest`,
+# `test / windows-latest` and `test (release)` — were exactly the six check-runs
+# main's HEAD produced and exactly the six the newest pull_request check-suite
+# produced, all `success`. Nothing needed correcting. It was declared anyway,
+# because that list lived only in the GitHub settings page, and that page has no
+# diff, no reviewer and no history anyone reads. The sibling rust-img-qcow2 is
+# what the gap looks like after the fact: it produces a sixth check,
+# `test / i686-unknown-linux-gnu`, that nobody ever made required, and the only
+# reason we know is that somebody went and counted.
 #
-# WHAT EACH NAME IS. All six come from .github/workflows/ci.yml, which triggers
-# on `pull_request`, so all six can gate a pull request — a check that only runs
-# on a tag or a schedule must never be declared, because a required check that
-# never reports blocks the branch permanently. release.yml is exactly that and
-# is deliberately absent from this list.
+# ONE NAME NOW, BECAUSE A JOB STANDS FOR THE REST (#105). Declaring the six
+# real names moved the list into a reviewable file but did not stop it drifting
+# — it only made the drift a diff nobody was obliged to write. Both failure
+# directions were still one ordinary edit away:
 #
-#   test / ubuntu-latest    the `test` job's matrix legs. Debug profile, so
-#   test / macos-latest     overflow checks are on; this is the run that carries
-#   test / windows-latest   the EXPECT_OVERFLOW_CHECKS handshake that
-#                           tests/ci_profile.rs insists on. Three platforms
-#                           because the byte-level VHDX code is the kind that
-#                           differs by target, and windows-latest is the leg
-#                           most likely to be quietly dropped.
-#   test (release)          the release-profile run. Not redundant beside the
-#                           matrix: release lets an integer overflow wrap where
-#                           debug panics, so a test guarding a wrapping
-#                           computation passes the debug run for the wrong
-#                           reason. See the long comment above the job.
-#   qemu-validation         cross-validates our reader/writer against
-#                           `qemu-img`. The only job that proves we agree with
-#                           an implementation we did not write.
-#   fmt                     `cargo fmt --check`.
+#   * add a fourth platform to ci.yml's `os:` matrix and its leg reports on
+#     every pull request, requiring nothing, gating nothing. Green or red makes
+#     no difference to the merge, which is the rust-img-qcow2 state again.
+#   * rename a job, or mis-spell one here, and the name declared is a name no
+#     job produces. GitHub reads a required-and-absent context as PENDING, not
+#     as failed, so with enforce_admins on nothing merges and there is no
+#     failure to point at. `test / release` for `test (release)` is the spelling
+#     that does it: the matrix legs are "name, space, slash, space, matrix
+#     value" because ci.yml's `name:` types it that way, while `test (release)`
+#     is a job whose own `name:` carries literal parentheses and no slash.
+#     Neither is a GitHub convention, so neither can be inferred from the other.
 #
-# TWO JOB-NAMING SHAPES IN ONE FILE, AND THE SPELLINGS ARE NOT INTERCHANGEABLE.
-# GitHub reports a check-run under the job's rendered `name:`, and ci.yml uses
-# two different constructions:
+# So ci.yml grew one job, `ci-ok`, whose `needs:` names every other job in the
+# file and which fails unless each concluded `success`. That list lives beside
+# the jobs it names, in the same file, changed in the same diff that renames,
+# splits or adds one — and the name protection asks for does not move when the
+# jobs do.
 #
-#   name: test / ${{ matrix.os }}   ->  "test / ubuntu-latest"   (our own text,
-#                                       spaces around the slash because we typed
-#                                       them)
-#   test-release:  name: test (release)  ->  "test (release)"    (our own text
-#                                       again; the parentheses are literal, and
-#                                       there is NO slash)
+# WHAT ci-ok STANDS FOR. All four jobs run on `pull_request` (ci.yml triggers on
+# `push` to main and on `pull_request` with no branch filter), so all four can
+# gate one:
 #
-# Neither is a GitHub convention — both are just the strings in `name:` — which
-# is why they cannot be inferred from each other. Writing `test / release`, or
-# `test (ubuntu-latest)`, or dropping a space to `test/ubuntu-latest`, produces
-# a name nothing will ever report. With enforce_admins on, that is a repository
-# nobody can merge into. If a job is renamed, this file changes in the same
-# commit; github-guard will keep the old name required until the new one has
-# been green on main once, so the rename does not open a window.
+#   test            three matrix legs, ubuntu/macos/windows-latest. Debug
+#                   profile, so overflow checks are on; this is the run that
+#                   carries the EXPECT_OVERFLOW_CHECKS handshake that
+#                   tests/ci_profile.rs insists on. Three platforms because the
+#                   byte-level VHDX code is the kind that differs by target,
+#                   and windows-latest is the leg most likely to be quietly
+#                   dropped.
+#   test-release    `test (release)`, the release-profile run. Not redundant
+#                   beside the matrix: release lets an integer overflow wrap
+#                   where debug panics, so a test guarding a wrapping
+#                   computation passes the debug run for the wrong reason.
+#   qemu-validation cross-validates our reader/writer against `qemu-img`. The
+#                   only job that proves we agree with an implementation we did
+#                   not write, and the only one that builds
+#                   tests/qemu_validation.rs with its feature on.
+#   fmt             `cargo fmt --check`.
+#
+# NOTHING ELSE IN .github/workflows CAN GATE, and `needs:` could not reach it
+# anyway — it only names jobs in its own file. release.yml triggers on a
+# `v*.*.*` tag, which happens after the merge it would have gated, and fuzz.yml
+# is workflow_dispatch plus a nightly cron. Neither reports on a pull request,
+# and a required check that never reports blocks the branch permanently, which
+# is the same pending-forever failure as a mis-spelled name.
+#
+# Third-party reviewers do not need excluding by hand: github-protect-main.sh
+# filters `select(.app.slug=="github-actions")` on every query, so a review app
+# cannot become required.
+#
+# The name must match the check-run name GitHub reports, which for this job is
+# both its key and its `name:` — `ci-ok`.
+#
+# tests/ci_aggregate_gate.rs holds both halves to each other: every job in
+# ci.yml has to appear in `ci-ok`'s `needs`, and this file has to require
+# `ci-ok` and nothing else.
 [checks]
-	required = fmt
-	required = qemu-validation
-	required = test / ubuntu-latest
-	required = test / macos-latest
-	required = test / windows-latest
-	required = test (release)
+	required = ci-ok
