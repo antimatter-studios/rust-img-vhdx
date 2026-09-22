@@ -202,3 +202,65 @@ jobs:
           path: tmp/logs/
           if-no-files-found: warn
           retention-days: 7
+
+  # ONE CHECK GATES A MERGE, AND IT STANDS FOR EVERY JOB IN THIS FILE (#105).
+  #
+  # Branch protection names checks, and a check is a job name, so the
+  # required list is a copy of the names in this file kept in a system
+  # that has no diff, no reviewer and no relationship to it. This
+  # repository's copy had six entries — `fmt`, `qemu-validation`, the
+  # three `test / <os>` matrix legs and `test (release)` — and both ways
+  # of getting it wrong were one ordinary edit away.
+  #
+  # Add a fourth platform to the `os:` matrix above and its leg reports on
+  # every pull request while nothing requires it: green, red, it makes no
+  # difference to the merge. That is the state the sibling rust-img-qcow2
+  # was found in, producing a `test / i686-unknown-linux-gnu` check that
+  # was required by nobody. The opposite spelling is worse. Rename this
+  # job — or write `test / release` for `test (release)`, whose
+  # parentheses are literal and whose name has no slash in it — and
+  # protection is left requiring a name no job produces, which GitHub
+  # reads as permanently pending. With enforce_admins on that is a branch
+  # nobody can merge into and no failure to point at.
+  #
+  # `needs:` below is that list, living beside the jobs it names and
+  # changed in the same diff that renames, splits or adds one. Protection
+  # names `ci-ok` alone, and that name does not move when the jobs do.
+  #
+  # IT FAILS ON SKIPPED AND ON CANCELLED, NOT ONLY ON FAILURE. A job that
+  # was skipped is not a job that passed — it is a job that produced no
+  # evidence, which is exactly what this gate exists to refuse. `if:
+  # always()` is what lets it judge them at all: without it the aggregate
+  # is skipped along with its needs, and a skipped required check never
+  # reports, so the branch goes back to being permanently pending.
+  #
+  # NOTHING FROM THE OTHER WORKFLOWS IS HERE, and `needs:` could not name
+  # them if it wanted to. release.yml triggers on a `v*.*.*` tag, after
+  # the merge it would have gated; fuzz.yml is workflow_dispatch plus a
+  # nightly cron. Neither reports on a pull request at all, and a required
+  # check that never reports blocks every merge forever.
+  #
+  # tests/ci_aggregate_gate.rs holds both halves of this: every job in
+  # this file has to appear in `needs`, and .github-guard has to require
+  # `ci-ok` and nothing else.
+  ci-ok:
+    name: ci-ok
+    needs: [test, test-release, fmt, qemu-validation]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: every gating job must have concluded success
+        # `toJSON(needs)` rather than a line per job: the script then says
+        # nothing about which jobs exist, so adding one to `needs:` above
+        # is the whole edit and there is no second list to forget.
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          echo "$NEEDS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          bad="$(echo "$NEEDS" | jq -r '[to_entries[] | select(.value.result != "success") | .key] | join(", ")')"
+          if [ -n "$bad" ]; then
+            echo "::error::not green: $bad (failed, cancelled or skipped)"
+            exit 1
+          fi
+          echo "all gating jobs succeeded"

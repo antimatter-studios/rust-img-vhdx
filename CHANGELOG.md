@@ -96,6 +96,18 @@ never does.
   with a message describing the opener rather than the file. The
   capability test now happens after the chain is assembled.
 
+### Changed
+
+- **One required check, `ci-ok`, stands for every job in `ci.yml`.**
+  Branch protection named six job names by hand — `fmt`,
+  `qemu-validation`, the three `test / <os>` matrix legs and
+  `test (release)` — so adding a matrix leg produced a check that gated
+  nothing, and renaming a job left a required name no job reports, which
+  GitHub reads as permanently pending rather than failed. `ci-ok` runs
+  with `if: always()`, `needs:` every other job, and fails when any of
+  them failed, was cancelled or was skipped. `tests/ci_aggregate_gate.rs`
+  holds `ci.yml` and `.github-guard` to each other (#105).
+
 ## [0.3.5] — 2026-09-06
 
 ### Fixed
