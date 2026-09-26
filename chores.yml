@@ -28,8 +28,8 @@ chore_min_version: 0.6.0
 #
 #   A test task prints a VERDICT: one line per tier, a final count, and the
 #   path of the log holding everything else. A failure prints the TAIL of
-#   that log. `chore test -- --verbose` (or FLTH_VERBOSE=1) streams the whole
-#   run as it happens.
+#   that log. `chore test -- --verbose` (or OUTPUT_BUDGET_VERBOSE=1) streams
+#   the whole run as it happens.
 #
 #   Nothing is thrown away: every tier's output goes to tmp/logs/<tier>.log
 #   in full, and CI uploads that directory as an artefact. What changed is
@@ -43,21 +43,27 @@ chore_min_version: 0.6.0
 #   the largest of the three matrix legs in each case.
 #
 #     tier     measured        budget         headroom, and why
-#     debug      303 / 19,663    400 / 27,000  ~32% / ~37%: 259 executed
+#     debug      320 / 20,567    400 / 27,000  ~20% / ~24%: 270 executed
 #                                              tests at one line each. The
 #                                              job has a separate build step,
 #                                              so no `Compiling` lines land
 #                                              here
-#     release    303 / 19,663    400 / 27,000  the same selection in the other
-#                                              profile. The job has no
-#                                              separate build step, so a cold
-#                                              cache puts ~70 `Compiling`
-#                                              lines in this tier too
+#     release    356 / 21,772    400 / 27,000  ~11% / ~19%: the same selection
+#                                              in the other profile. The job
+#                                              has no separate build step, so
+#                                              a cold cache puts ~70
+#                                              `Compiling` lines in this tier
+#                                              too
 #     qemu        23 /  1,280    120 /  9,000  15 cross-validated images, plus
 #                                              the cold-cache compile of a
 #                                              target nothing else builds --
 #                                              the feature gate keeps it out
 #                                              of `--all-targets`
+#
+#   Re-measured 2026-09-26 on an arm64 Linux host, at 270 executed tests: the
+#   numbers above are that run's, and no budget moved with them. The release
+#   row is the tight one now -- 356 of 400 lines -- because it carries its own
+#   compile. When it does need raising, raise it with the measurement.
 #
 #   Raise one DELIBERATELY when a tier grows, the way the executed-test
 #   floors are raised -- and raise it in .github/workflows/ci.yml at the same
@@ -78,11 +84,24 @@ chore_min_version: 0.6.0
 #   9.5M of output, with command output the largest single contributor a
 #   repository controls.
 #
-#   WHERE THE SCRIPT CAME FROM. scripts/output-budget.sh is a vendored copy
-#   of fs-linux-test-harness's, at v0.1.0; the header of that file says why a
-#   copy rather than the sibling the filesystem crates read it from, and
-#   tests/output_budget.rs holds the copy to the behaviour rather than to the
-#   bytes.
+#   WHERE THE SCRIPT COMES FROM, AND IT IS NOT FROM HERE. The wrapper the
+#   tiers run through is rust-fs-core's scripts/output-budget.sh. This
+#   repository used to carry a copy of it; the copy is gone
+#   (rust-fs-core#153), because a committed copy is a copy that drifts and
+#   the family had several, each internally consistent and nothing comparing
+#   them. scripts/tier.sh resolves core's file at run time -- $FS_CORE_ROOT,
+#   then ../rust-fs-core, then wherever cargo says am-fs-core is -- verifies
+#   it by asking for `--version`, and copies it into tmp/ for the run only.
+#   Anything else is a refusal, not a fallback; the header of scripts/tier.sh
+#   says why, and tests/output_budget.rs holds the resolver to it.
+#
+#   IF A TIER REFUSES TO START, that is what it is telling you: the core
+#   beside this checkout is older than v0.2.11 and does not ship the script.
+#   Point FS_CORE_ROOT at a checkout that does. It is a normal state here --
+#   the crate is COMPILED against core v0.2.10 and cannot move (see "The pin
+#   you cannot bump" in AGENTS.md), so the checkout cargo builds from and the
+#   checkout the wrapper comes from are two different pins, and ci.yml clones
+#   both.
 vars:
   TRIPLE: aarch64-apple-darwin
   # `[package].name` is am-img-vhdx; `[lib].name` is vhdx, so cargo writes
