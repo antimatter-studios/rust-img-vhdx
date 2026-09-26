@@ -189,8 +189,17 @@ against `v0.2.10`. Every one is a write landing exactly at the device's current
 end.
 
 Do **not** bump the pin, and do **not** "fix" it by reverting #75 — that
-reintroduces #70. Tracked as rust-fs-core#147/#129; the agreed replacement is
-`BlockDevice::set_len` plus `can_grow()`.
+reintroduces #70. Tracked as rust-fs-core#147/#129 and, on this side, #111 and
+#117; the agreed replacement is `BlockDevice::set_len` plus `can_grow()`,
+which core has had since v0.2.12 and this crate does not yet call. Re-measured
+on 2026-09-26: core v0.2.11 and v0.2.13 each fail
+`a_sound_log_region_still_opens_and_writes` with `OutOfBounds { offset:
+67108864, len: 1048576, size: 67108864 }` — one write, landing at the device's
+exact end.
+
+This pin is about the crate this one LINKS. The `scripts/output-budget.sh`
+that `scripts/tier.sh` runs is a shell script, comes from a different core
+checkout, and is pinned separately — see "Two core pins" below.
 
 One practical consequence: `pre-commit.d/rust-clippy.sh` runs clippy without
 `--locked`, so a `../rust-fs-core` checkout that is semver-ahead of the pin
@@ -199,6 +208,51 @@ commit over a file the commit never contained. That is a livelock
 (agent-skills#64). Work from a throwaway worktree with `../rust-fs-core` at
 `v0.2.10` rather than reaching for `--no-verify`, which disables every guard at
 once.
+
+## The output budget comes from rust-fs-core, at run time
+
+Every tier goes through `scripts/tier.sh`, and the wrapper it runs — the
+thing that keeps a run quiet, logs all of it and fails a run that printed
+more than its budget — is **rust-fs-core's `scripts/output-budget.sh`**.
+There is no copy of it in this repository and there must not be one again
+(rust-fs-core#153): the family had several copies, reached four different
+ways, each internally consistent and nothing comparing them.
+
+`tier.sh` resolves it in this order, takes the **first candidate that
+exists**, and **refuses** rather than falling through:
+
+1. `$FS_CORE_ROOT/scripts/output-budget.sh`, when that variable is set;
+2. `../rust-fs-core/scripts/output-budget.sh`, the sibling. Sibling before
+   cargo is load-bearing: this suite runs on `windows-latest` under Git Bash,
+   where `cargo metadata` answers with a `C:\...` path that Git Bash can
+   neither test nor copy;
+3. the `am-fs-core` package root `cargo metadata` names.
+
+Whichever it finds is then **verified by running it**: `--version` must
+answer exactly `rust-fs-core-output-budget 1`. A wrapper that is present and
+answers something else is fatal. It is not pinned by SHA-256 — a digest in
+seven repositories has to be raised in seven repositories for every edit to
+one file, which is the lockstep this arrangement removes.
+
+**`OUTPUT_BUDGET_VERBOSE`, not `FLTH_VERBOSE`.** The canonical script does
+not read the old name, and setting it does nothing at all — no error, the run
+simply stays quiet. If `--verbose` ever stops streaming, that is the first
+thing to check.
+
+### Two core pins, and why they are different numbers
+
+The crate is **compiled** against `am-fs-core` v0.2.10 and cannot move, for
+the reason above. The **wrapper** comes from v0.2.13 — the first release with
+the quiet-failure behaviour, where v0.2.11 is the first that ships the script
+at all — and `ci.yml` clones that separately into `../rust-fs-core-budget`,
+exporting `FS_CORE_ROOT` for the tier steps. A shell script this repository
+runs is not code it links, so the dependency's pin has nothing to say about
+it.
+
+Locally the same split applies: a `../rust-fs-core` pinned at v0.2.10 has no
+wrapper, so `tier.sh` will refuse to start until `FS_CORE_ROOT` names a
+checkout that has one. The two pins collapse back into one the day this crate
+can build against a current core — see #111 and #117.
 
 ## What gates a merge
 
