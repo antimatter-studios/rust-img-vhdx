@@ -171,12 +171,34 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # `cargo doc` RESOLVES THE PATH DEPENDENCY, even though `cargo fmt` does
+      # not -- so this job needs core beside the checkout and did not before
+      # the docs step below was added. Same ref as every other job.
+      - name: clone am-fs-core sibling
+        shell: bash
+        run: git clone --depth 1 --branch v0.2.13 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.95.0
           components: rustfmt
       - name: fmt --check
         run: cargo fmt --check
+      # THE PUBLIC DOCS BUILD, AND A BROKEN LINK IS AN ERROR (#124).
+      #
+      # `cargo build`, `cargo test` and `cargo clippy` all ignore intra-doc
+      # links, so a link to a private item or to something renamed away was
+      # invisible to every gate here. Measured: clippy `-D warnings` clean and
+      # all three tiers green on a tree where rustdoc reported an error.
+      #
+      # `-D warnings` specifically. rustdoc's default is to warn and carry on,
+      # which is how a page ships with its links dead and no failure anywhere
+      # -- and the errors mask each other, because rustdoc stops at the first
+      # failing pass. The sibling rust-img-qcow2 reached eight this way
+      # (qcow2#105), and fixing those surfaced seven more.
+      - name: cargo doc (public docs build, broken links are errors)
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --locked --no-deps
       - name: the one required check stands for every job
         run: scripts/ci-gate.sh
       - name: the agent guide carries the shared block
