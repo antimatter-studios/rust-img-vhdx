@@ -189,11 +189,18 @@ fn a_released_section_that_breaks_api_bumped_the_minor() {
          found {:?}",
         released.iter().map(|(n, _, _)| n).collect::<Vec<_>>()
     );
-    assert!(
-        released.iter().any(|(_, _, body)| marks_a_break(body)),
-        "no released section marks anything BREAKING, so this test cannot fail \
-         and is not guarding the rule it names"
-    );
+    // NO CONTROL DEMANDING A REAL `BREAKING` ENTRY, and this file had one. It
+    // asserted the changelog contained a marker, so that a scan matching
+    // nothing could not pass vacuously -- reasonable, and wrong: a crate whose
+    // released history has broken nothing would have to invent a break to
+    // satisfy it. Porting this file to `rust-img-qcow2`, which has only added
+    // public methods since its last release, failed on that CONTROL rather
+    // than on the rule -- the same "a check that cannot fail" defect the
+    // control was written to prevent, arrived at from the other side.
+    //
+    // `a_break_is_recognised_however_it_is_spelled` is the honest form: it
+    // proves the scan works against bodies it is handed, rather than requiring
+    // the repository to supply one.
 
     // Newest first, so each section's predecessor is the next one down.
     for pair in released.windows(2) {

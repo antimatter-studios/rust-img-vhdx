@@ -9,6 +9,23 @@ never does.
 
 ### Changed
 
+- **`a_released_section_that_breaks_api_bumped_the_minor` no longer demands
+  that the changelog contain a break.** It carried a control asserting one
+  exists, so that a scan matching nothing could not pass vacuously —
+  reasonable, and wrong: a crate whose released history has broken nothing
+  would have to invent a break to satisfy it.
+
+  Porting this file to `rust-img-qcow2`, which has only added public methods
+  since v0.4.5, failed on that **control** rather than on the rule. That is the
+  same "a check that cannot fail" defect the control was written to prevent,
+  arrived at from the other side — the check could not *pass* on an honest
+  changelog.
+
+  Proving the scan works belongs in a test of the scan, which
+  `a_break_is_recognised_however_it_is_spelled` already does against bodies it
+  is handed. The remaining control — at least two released sections, so there
+  is a pair to compare — stays.
+
 - **`a_released_section_that_breaks_api_bumped_the_minor` matches the marker
   case-insensitively.** It was `body.contains("BREAKING")`, matched against the
   uppercase spelling this repository happens to use. The sibling
