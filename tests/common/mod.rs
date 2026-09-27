@@ -12,7 +12,7 @@
 
 use std::fs::File;
 use std::io::{Seek, SeekFrom, Write};
-use std::path::PathBuf;
+use std::path::Path;
 
 pub const ONE_MIB: u64 = 1024 * 1024;
 pub const HEADER_SIZE: usize = 4096;
@@ -66,13 +66,16 @@ impl WriteAt for File {
     }
 }
 
-pub fn tmp_path(name: &str) -> PathBuf {
+#[path = "temp_path.rs"]
+pub mod temp_path;
+pub use temp_path::TempPath;
+
+/// A `.vhdx` fixture path for the synthetic and corruption suites.
+pub fn tmp_path(name: &str) -> TempPath {
     use std::sync::atomic::{AtomicU32, Ordering};
     static N: AtomicU32 = AtomicU32::new(0);
     let n = N.fetch_add(1, Ordering::Relaxed);
-    let mut p = std::env::temp_dir();
-    p.push(format!("vhdx_synth_{}_{n}_{name}.vhdx", std::process::id()));
-    p
+    TempPath::named(format!("vhdx_synth_{}_{n}_{name}.vhdx", std::process::id()))
 }
 
 /// Encode a 4 KiB header with a valid CRC-32C. `seq` is the sequence
@@ -187,7 +190,7 @@ pub fn encode_metadata_with_flags(
 /// one — and no fixture could set it while the metadata builder
 /// hardcoded the word to zero.
 pub fn build_vhdx_with_file_params_flags(
-    path: &PathBuf,
+    path: &Path,
     data: &[u8; BLOCK_SIZE as usize],
     file_params_flags: u32,
 ) {
@@ -196,11 +199,11 @@ pub fn build_vhdx_with_file_params_flags(
 
 /// Build a minimal 1-block VHDX. Header 1 is valid (sequence=1),
 /// header 2 is zero (invalid), so the reader picks header 1.
-pub fn build_vhdx(path: &PathBuf, data: &[u8; BLOCK_SIZE as usize]) {
+pub fn build_vhdx(path: &Path, data: &[u8; BLOCK_SIZE as usize]) {
     build_vhdx_inner(path, data, 0)
 }
 
-fn build_vhdx_inner(path: &PathBuf, data: &[u8; BLOCK_SIZE as usize], file_params_flags: u32) {
+fn build_vhdx_inner(path: &Path, data: &[u8; BLOCK_SIZE as usize], file_params_flags: u32) {
     let mut f = File::create(path).unwrap();
     f.set_len(TOTAL_FILE_SIZE).unwrap();
 
@@ -251,7 +254,7 @@ pub const BIG_TOTAL_FILE_SIZE: u64 = 64 * ONE_MIB;
 /// Build a VHDX image with a real (empty) log region, a 4-entry BAT, and
 /// only the first block on disk. Used by the write-path and log-replay
 /// tests.
-pub fn build_big_vhdx(path: &PathBuf, block0: &[u8; BIG_BLOCK_SIZE as usize]) {
+pub fn build_big_vhdx(path: &Path, block0: &[u8; BIG_BLOCK_SIZE as usize]) {
     let mut f = File::create(path).unwrap();
     f.set_len(BIG_TOTAL_FILE_SIZE).unwrap();
 

@@ -41,8 +41,6 @@ fn fully_present_block_round_trips() {
         let expected = ((1000 * 1024 + i) & 0xFF) as u8;
         assert_eq!(*b, expected);
     }
-
-    let _ = std::fs::remove_file(&path);
 }
 
 /// A read running off the end is refused as `OutOfBounds`, and the
@@ -82,7 +80,6 @@ fn out_of_bounds_read_errors() {
         }
         other => panic!("a read eight bytes short of the end gave {other:?}"),
     }
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -96,7 +93,6 @@ fn fs_core_blockread_size_matches_virtual() {
         <VhdxReader as fs_core::BlockRead>::size_bytes(&r),
         VIRTUAL_DISK_SIZE
     );
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -130,7 +126,6 @@ fn rw_open_writes_into_allocated_block() {
     let mut readback = [0u8; 512];
     r2.read_at(2048, &mut readback).unwrap();
     assert_eq!(readback, payload);
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -165,7 +160,6 @@ fn rw_open_writes_into_unallocated_block_allocates() {
     let mut got = [0u8; 4096];
     r2.read_at(virt_off + 8192, &mut got).unwrap();
     assert_eq!(got, payload);
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -195,7 +189,6 @@ fn rw_open_multi_block_write_spans_allocated_and_unallocated() {
     let mut readback = vec![0u8; len];
     r2.read_at(start, &mut readback).unwrap();
     assert_eq!(readback, payload);
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -252,7 +245,6 @@ fn ro_open_against_writable_file_replays_dirty_log() {
         again.iter().all(|b| *b == 0xEE),
         "the replayed sector did not persist"
     );
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -271,7 +263,6 @@ fn open_on_device_round_trips_through_file_device() {
         let expected = ((i as u32).wrapping_mul(6) & 0xFF) as u8;
         assert_eq!(*b, expected, "byte {i} mismatch");
     }
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -297,7 +288,6 @@ fn open_rw_on_device_writes_persist() {
     let mut readback = [0u8; 1024];
     r2.read_at(4096, &mut readback).unwrap();
     assert_eq!(readback, payload);
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -312,7 +302,6 @@ fn open_rw_on_device_rejects_readonly_inner() {
         Err(e) => panic!("expected ReadOnly, got: {e}"),
         Ok(_) => panic!("expected ReadOnly, got Ok"),
     }
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -324,7 +313,6 @@ fn ro_open_rejects_write() {
     let r = VhdxReader::open(&path).unwrap();
     let err = r.write_at(0, b"x").unwrap_err();
     assert!(matches!(err, vhdx::Error::ReadOnly));
-    let _ = std::fs::remove_file(&path);
 }
 
 /// Writing into a PartiallyPresent block is refused, not silently
@@ -376,7 +364,6 @@ fn write_to_a_partially_present_block_is_refused() {
     assert!(r.read_at(virt_off, &mut buf).is_err());
 
     drop(r);
-    let _ = std::fs::remove_file(&path);
 }
 
 /// The in-block offset reaches the host file, and is not silently
@@ -421,7 +408,6 @@ fn a_write_lands_at_its_in_block_offset_in_the_host_file() {
         "the start of the block must be untouched — an in-block offset \
          collapsed to zero would have overwritten exactly this"
     );
-    let _ = std::fs::remove_file(&path);
 }
 
 /// Build a log entry carrying a single "zero" descriptor.
@@ -456,7 +442,7 @@ fn zero_descriptor_entry(seq: u64, guid: &[u8; 16], file_offset: u64, len: u64) 
 }
 
 /// Point the header at a live log so the next open replays it.
-fn arm_the_log(path: &std::path::PathBuf, entry: &[u8], log_guid: &[u8; 16]) {
+fn arm_the_log(path: &std::path::Path, entry: &[u8], log_guid: &[u8; 16]) {
     let mut f = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -540,8 +526,6 @@ fn a_read_only_open_does_not_let_the_log_erase_the_file() {
         f.read_exact(&mut after).unwrap();
     }
     assert_eq!(before, after, "the image's first data block was erased");
-
-    let _ = std::fs::remove_file(&path);
 }
 
 /// The log, the metadata table and the BAT are each located by an
@@ -596,7 +580,6 @@ fn a_region_claiming_more_than_the_file_is_refused() {
             "a {which} region of 4 GiB in a 64 MiB file was refused as {why}, \
              which means the buffer was allocated and read first"
         );
-        let _ = std::fs::remove_file(&path);
     }
 }
 
@@ -640,7 +623,6 @@ fn a_bat_entry_pointing_past_the_file_is_refused_by_name() {
     );
 
     drop(r);
-    let _ = std::fs::remove_file(&path);
 }
 
 // ---------------------------------------------------------------------------
@@ -678,7 +660,6 @@ fn a_stale_log_guid_with_nothing_pending_opens_on_a_read_only_device() {
         "the image did not read back correctly"
     );
     drop(r);
-    let _ = std::fs::remove_file(&path);
 }
 
 /// The complement, which is what stops the fix above from becoming
@@ -717,8 +698,6 @@ fn a_pending_log_on_a_read_only_device_is_still_refused() {
         block0[..4096],
         "the read-only open applied the log"
     );
-
-    let _ = std::fs::remove_file(&path);
 }
 
 // ---------------------------------------------------------------------------
@@ -869,7 +848,6 @@ fn a_block_a_replay_allocated_past_the_old_end_reads_back() {
         .expect("the block the replay allocated reads, in the same open");
     assert_eq!(got, payload);
     drop(r);
-    let _ = std::fs::remove_file(&path);
 }
 
 /// An allocation journals only its BAT sector, so the block it names is
@@ -942,7 +920,6 @@ fn a_replayed_allocation_named_only_by_last_file_offset_reads_as_zeros() {
     .expect("the last sector of the recovered block reads, in the same open");
     assert_eq!(got, vec![0u8; 4096]);
     drop(r);
-    let _ = std::fs::remove_file(&path);
 }
 
 /// The first journalled write after a replay must rotate *off* the
@@ -1009,8 +986,6 @@ fn a_journalled_write_after_replay_rotates_off_the_header_replay_wrote() {
         "both slots carry the same sequence number, which is the tie \
          `pick_header` documents as meaning the two describe the same state"
     );
-
-    let _ = std::fs::remove_file(&path);
 }
 
 /// Counts the bytes written into the log region.
@@ -1096,7 +1071,6 @@ fn a_journalled_write_writes_its_entry_not_the_whole_log_region() {
     r.read_at(2 * u64::from(BIG_BLOCK_SIZE) + 5000, &mut got)
         .unwrap();
     assert_eq!(got, [0xD2; 3000]);
-    let _ = std::fs::remove_file(&path);
 }
 
 /// A device that silently drops every write after the first `budget`, as
@@ -1175,18 +1149,13 @@ fn a_journalled_write_cut_anywhere_reopens_as_before_or_after() {
     let mut total = None;
     let mut replayed_cuts = 0;
 
-    /// Removes the image when the iteration ends, including by a failed
-    /// assertion.
-    struct RemoveOnDrop(std::path::PathBuf);
-    impl Drop for RemoveOnDrop {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_file(&self.0);
-        }
-    }
-
+    // The local `RemoveOnDrop` this loop used to carry is `TempPath` now:
+    // every fixture in the suite removes itself on the way out, including
+    // by a failed assertion, so the one place that had already noticed it
+    // needed that stops being special (#107).
     for cut in 0.. {
-        let image = RemoveOnDrop(tmp_path(&format!("cut{cut}")));
-        let path = &image.0;
+        let image = tmp_path(&format!("cut{cut}"));
+        let path = &*image;
         build_big_vhdx(path, &pattern_block(9));
 
         let dev = std::sync::Arc::new(CutAfter {
@@ -1299,7 +1268,6 @@ fn an_allocation_leaves_the_file_long_enough_for_the_block_the_bat_names() {
     let mut got = vec![0u8; payload.len()];
     r.read_at(u64::from(BIG_BLOCK_SIZE), &mut got).unwrap();
     assert_eq!(got, payload, "the allocated block does not read back");
-    let _ = std::fs::remove_file(&path);
 }
 
 /// A VHDX EXPOSED AS A BLOCK DEVICE DOES NOT GROW, AND SAYS SO.
@@ -1330,5 +1298,4 @@ fn a_vhdx_does_not_offer_to_grow_the_disk_inside_it() {
         "the device's size stopped being the disk's virtual size"
     );
     drop(r);
-    let _ = std::fs::remove_file(&path);
 }

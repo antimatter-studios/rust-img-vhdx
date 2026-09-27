@@ -31,8 +31,19 @@
 
 #![cfg(feature = "qemu-validation")]
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
+
+// THE ONE DEFINITION OF `TempPath`, REACHED WITHOUT THE FIXTURE BUILDERS.
+//
+// This file had a second copy of it, written out again because it does not
+// use `tests/common/mod.rs`'s builders -- it builds its fixtures with
+// `qemu-img`, which is the point of the suite -- and importing that module
+// for one RAII wrapper would drag them in. A `#[path]` module reaches the
+// single file the type lives in and nothing else (#107).
+#[path = "common/temp_path.rs"]
+mod temp_path;
+use temp_path::TempPath;
 
 use vhdx::VhdxReader;
 
@@ -60,38 +71,14 @@ fn tmp_path(name: &str) -> TempPath {
     use std::sync::atomic::{AtomicU32, Ordering};
     static N: AtomicU32 = AtomicU32::new(0);
     let n = N.fetch_add(1, Ordering::Relaxed);
-    let mut p = std::env::temp_dir();
-    p.push(format!("vhdx_qemu_{}_{n}_{name}.vhdx", std::process::id()));
-    TempPath(p)
-}
-
-/// RAII temp-file path: removes the backing file on drop so a panicking
-/// assertion can't leak fixtures into the temp dir across CI runs.
-struct TempPath(PathBuf);
-impl std::ops::Deref for TempPath {
-    type Target = Path;
-    fn deref(&self) -> &Path {
-        &self.0
-    }
-}
-impl AsRef<Path> for TempPath {
-    fn as_ref(&self) -> &Path {
-        &self.0
-    }
-}
-impl Drop for TempPath {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
+    TempPath::named(format!("vhdx_qemu_{}_{n}_{name}.vhdx", std::process::id()))
 }
 
 fn raw_path(name: &str) -> TempPath {
     use std::sync::atomic::{AtomicU32, Ordering};
     static N: AtomicU32 = AtomicU32::new(0);
     let n = N.fetch_add(1, Ordering::Relaxed);
-    let mut p = std::env::temp_dir();
-    p.push(format!("vhdx_qemu_{}_{n}_{name}.raw", std::process::id()));
-    TempPath(p)
+    TempPath::named(format!("vhdx_qemu_{}_{n}_{name}.raw", std::process::id()))
 }
 
 fn qemu_create(path: &Path, size: &str) {

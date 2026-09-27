@@ -39,6 +39,44 @@ never does.
 
 ### Fixed
 
+- **A panicking test removes its fixture, including the 64 MiB sparse
+  images.** *(#107)* `tests/corruption.rs` ended each test with a bare
+  `let _ = std::fs::remove_file(&path);` — 38 of them — and a test that panics
+  never reaches that line. A failing test is exactly when the fixture leaks,
+  and a failing test is what a developer then reruns in a loop; three of these
+  build 64 MiB sparse images.
+
+  Measured, by injecting a panic into
+  `a_bat_region_longer_than_the_disk_needs_is_not_read_past_the_disk`:
+
+  | | left in `TMPDIR` |
+  |---|---|
+  | before | **1 file, 64 MiB**, per failing run |
+  | after | **0** |
+
+  `tmp_path` returns a `TempPath` whose `Drop` removes the file, and `Drop`
+  runs during unwind. It derefs to `Path` and implements `AsRef<Path>`, so the
+  call sites are unchanged; the 38 manual removals are gone, as are 24 more in
+  `tests/synthetic.rs` and the local `RemoveOnDrop` that one loop there had
+  already reached for.
+
+  `tests/qemu_validation.rs` carried a **second copy** of the same type,
+  written out again because it does not use the fixture builders in
+  `tests/common/mod.rs` and importing that module for one RAII wrapper would
+  drag them in. `TempPath` lives in `tests/common/temp_path.rs` and both
+  targets reach it with `#[path]`, which pulls in that file and nothing else —
+  so the copy that would have drifted is gone rather than doubled.
+
+  The guard is `a_panicking_test_still_removes_its_fixture`, which plants a
+  probe inside a closure that panics and fails if it survives. Without it, an
+  emptied `Drop` body leaves the whole suite green — every test cleans up on
+  its way out whether the removal works or not, so nothing else depends on it.
+  It compares **that exact path**, not a prefix scan of the temp directory:
+  several test binaries share one `TMPDIR`, pids are reused and the
+  per-process counter restarts at zero, so a stale probe can carry the same
+  name. `probes_left_by_other_runs_do_not_fail_the_drop_test` plants two such
+  corpses and requires the guard to ignore them.
+
 - **`compute_crc` refuses a short buffer instead of panicking, and now
   returns a `Result`.** *(#113 — BREAKING: `header::compute_crc` and
   `region_table::compute_crc` return `Result<u32>` rather than `u32`.)*
