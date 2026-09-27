@@ -207,6 +207,10 @@ jobs:
         # CI here does not install chore -- a guard wired only into a task
         # nothing runs is a guard that reports protection it is not providing.
         run: scripts/agents-core-check.sh
+      - name: no tracked file names a consuming application
+        # The standalone-crate rule (AGENTS.md, "Project rules"), held by a
+        # scan of every tracked file rather than by memory (#131).
+        run: bash tests/scripts/test-no-consumer-names.sh
 
   # Cross-validates our reader/writer against `qemu-img`. qemu-img is
   # invoked as a subprocess only — never linked, never bundled. The
