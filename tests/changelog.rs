@@ -139,6 +139,25 @@ fn the_manifest_version_is_the_newest_released_section() {
     );
 }
 
+/// Does this section body declare a break?
+///
+/// CASE-INSENSITIVE, AND THAT IS NOT A NICETY. The first version of this check
+/// was `body.contains("BREAKING")`, matched against the uppercase spelling
+/// this repository happens to use. The sibling `rust-img-vhd` writes it
+/// lowercase -- `**\`Error::ReadOnly\` carries its cause** (breaking: match
+/// \`ReadOnly(_)\`)` -- and an `Error` variant that gained a payload is as
+/// breaking as anything here. So the guard would have passed that changelog
+/// and let the release ship as a patch: a check that misses the very case it
+/// was written for reports protection it is not providing, which is the defect
+/// this whole file exists to catch, found inside the file itself.
+///
+/// The word, in any case, anywhere in the section. Deliberately loose: a false
+/// positive costs a minor bump nobody needed, and a false negative costs a
+/// consumer a build that stopped compiling on a patch.
+fn marks_a_break(body: &str) -> bool {
+    body.to_ascii_lowercase().contains("breaking")
+}
+
 /// A RELEASED SECTION THAT SAYS `BREAKING` BUMPED THE MINOR.
 ///
 /// This is #63 as an assertion. The crate header states the rule — "this is a
@@ -171,9 +190,7 @@ fn a_released_section_that_breaks_api_bumped_the_minor() {
         released.iter().map(|(n, _, _)| n).collect::<Vec<_>>()
     );
     assert!(
-        released
-            .iter()
-            .any(|(_, _, body)| body.contains("BREAKING")),
+        released.iter().any(|(_, _, body)| marks_a_break(body)),
         "no released section marks anything BREAKING, so this test cannot fail \
          and is not guarding the rule it names"
     );
@@ -182,7 +199,7 @@ fn a_released_section_that_breaks_api_bumped_the_minor() {
     for pair in released.windows(2) {
         let (name, (major, minor, _), body) = &pair[0];
         let (previous_name, (previous_major, previous_minor, _), _) = &pair[1];
-        if !body.contains("BREAKING") {
+        if !marks_a_break(body) {
             continue;
         }
         assert!(
@@ -256,5 +273,26 @@ fn a_section_heading_is_read_as_a_version_or_not_at_all() {
         "[a.b.c]",
     ] {
         assert_eq!(version_of(unreadable), None, "{unreadable:?}");
+    }
+}
+
+/// The marker scan's own spellings, because the family uses more than one and
+/// the guard is worthless against the ones it cannot see.
+#[test]
+fn a_break_is_recognised_however_it_is_spelled() {
+    for body in [
+        "- **Thing changed** *(#1 — BREAKING: match `X(_)`.)*",
+        "- **`Error::ReadOnly` carries its cause** (breaking: match `ReadOnly(_)`).",
+        "- Something *(Breaking change.)*",
+        "- a bREaKiNg change",
+    ] {
+        assert!(marks_a_break(body), "{body:?}");
+    }
+    for body in [
+        "- **Thing changed**, no compatibility note at all.",
+        "- The brake was fixed.",
+        "",
+    ] {
+        assert!(!marks_a_break(body), "{body:?}");
     }
 }
