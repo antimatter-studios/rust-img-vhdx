@@ -7,64 +7,6 @@ never does.
 
 ## [Unreleased]
 
-### Changed
-
-- **`a_released_section_that_breaks_api_bumped_the_minor` no longer demands
-  that the changelog contain a break.** It carried a control asserting one
-  exists, so that a scan matching nothing could not pass vacuously —
-  reasonable, and wrong: a crate whose released history has broken nothing
-  would have to invent a break to satisfy it.
-
-  Porting this file to `rust-img-qcow2`, which has only added public methods
-  since v0.4.5, failed on that **control** rather than on the rule. That is the
-  same "a check that cannot fail" defect the control was written to prevent,
-  arrived at from the other side — the check could not *pass* on an honest
-  changelog.
-
-  Proving the scan works belongs in a test of the scan, which
-  `a_break_is_recognised_however_it_is_spelled` already does against bodies it
-  is handed. The remaining control — at least two released sections, so there
-  is a pair to compare — stays.
-
-- **`a_released_section_that_breaks_api_bumped_the_minor` matches the marker
-  case-insensitively.** It was `body.contains("BREAKING")`, matched against the
-  uppercase spelling this repository happens to use. The sibling
-  `rust-img-vhd` writes it lowercase — ``**`Error::ReadOnly` carries its
-  cause** (breaking: match `ReadOnly(_)`)`` — and an `Error` variant that
-  gained a payload is as breaking as anything here, so the guard would have
-  passed that changelog and let the release ship as a patch.
-
-  A check that misses the very case it was written for reports protection it is
-  not providing, which is the defect this whole file exists to catch, found
-  inside the file itself. `a_break_is_recognised_however_it_is_spelled` covers
-  the spellings the family actually uses and the near-misses it must not match.
-
-  Deliberately loose — the word, in any case, anywhere in the section. A false
-  positive costs a minor bump nobody needed; a false negative costs a consumer
-  a build that stopped compiling on a patch.
-
-- **`fuzz/Cargo.toml` follows this crate's `am-fs-core` pin, and a test says
-  so.** *(rust-img-qcow2#118)* The fuzz crate is a separate package with its own
-  manifest and lockfile, so nothing about bumping the parent's dependency
-  pointed at the child's: this one required `0.2.10` while the crate required
-  `0.2.13`, and `fuzz.yml` already checked core out at `v0.2.13`.
-
-  It was green throughout, which is the problem. `version = "0.2.10"` is a caret
-  requirement that `0.2.13` satisfies, the `path` source is what cargo actually
-  uses, and `cargo fuzz run` is not passed `--locked`, so the stale
-  `fuzz/Cargo.lock` was rewritten in place on every run. The day core reaches
-  `0.3.0` the parent resolves and the fuzz crate does not — and that surfaces
-  in a nightly cron, naming a version requirement rather than the bump behind
-  it.
-
-  `the_fuzz_crate_requires_the_same_core_as_this_one` in
-  `tests/fuzz_decoders.rs` compares the two manifests' `version` fields. It
-  refuses a bare `path` dependency too, since one passes every other check in
-  that file while saying nothing about which core it is for. Both failure modes
-  were confirmed to fail before the fix went in.
-
-  All four image crates had drifted, in three different ways.
-
 ## [0.4.0] — 2026-09-27
 
 ### Added
@@ -257,6 +199,62 @@ never does.
   capability test now happens after the chain is assembled.
 
 ### Changed
+
+- **`a_released_section_that_breaks_api_bumped_the_minor` no longer demands
+  that the changelog contain a break.** It carried a control asserting one
+  exists, so that a scan matching nothing could not pass vacuously —
+  reasonable, and wrong: a crate whose released history has broken nothing
+  would have to invent a break to satisfy it.
+
+  Porting this file to `rust-img-qcow2`, which has only added public methods
+  since v0.4.5, failed on that **control** rather than on the rule. That is the
+  same "a check that cannot fail" defect the control was written to prevent,
+  arrived at from the other side — the check could not *pass* on an honest
+  changelog.
+
+  Proving the scan works belongs in a test of the scan, which
+  `a_break_is_recognised_however_it_is_spelled` already does against bodies it
+  is handed. The remaining control — at least two released sections, so there
+  is a pair to compare — stays.
+
+- **`a_released_section_that_breaks_api_bumped_the_minor` matches the marker
+  case-insensitively.** It was `body.contains("BREAKING")`, matched against the
+  uppercase spelling this repository happens to use. The sibling
+  `rust-img-vhd` writes it lowercase — ``**`Error::ReadOnly` carries its
+  cause** (breaking: match `ReadOnly(_)`)`` — and an `Error` variant that
+  gained a payload is as breaking as anything here, so the guard would have
+  passed that changelog and let the release ship as a patch.
+
+  A check that misses the very case it was written for reports protection it is
+  not providing, which is the defect this whole file exists to catch, found
+  inside the file itself. `a_break_is_recognised_however_it_is_spelled` covers
+  the spellings the family actually uses and the near-misses it must not match.
+
+  Deliberately loose — the word, in any case, anywhere in the section. A false
+  positive costs a minor bump nobody needed; a false negative costs a consumer
+  a build that stopped compiling on a patch.
+
+- **`fuzz/Cargo.toml` follows this crate's `am-fs-core` pin, and a test says
+  so.** *(rust-img-qcow2#118)* The fuzz crate is a separate package with its own
+  manifest and lockfile, so nothing about bumping the parent's dependency
+  pointed at the child's: this one required `0.2.10` while the crate required
+  `0.2.13`, and `fuzz.yml` already checked core out at `v0.2.13`.
+
+  It was green throughout, which is the problem. `version = "0.2.10"` is a caret
+  requirement that `0.2.13` satisfies, the `path` source is what cargo actually
+  uses, and `cargo fuzz run` is not passed `--locked`, so the stale
+  `fuzz/Cargo.lock` was rewritten in place on every run. The day core reaches
+  `0.3.0` the parent resolves and the fuzz crate does not — and that surfaces
+  in a nightly cron, naming a version requirement rather than the bump behind
+  it.
+
+  `the_fuzz_crate_requires_the_same_core_as_this_one` in
+  `tests/fuzz_decoders.rs` compares the two manifests' `version` fields. It
+  refuses a bare `path` dependency too, since one passes every other check in
+  that file while saying nothing about which core it is for. Both failure modes
+  were confirmed to fail before the fix went in.
+
+  All four image crates had drifted, in three different ways.
 
 - **`Error` is `#[non_exhaustive]`.** *(#63 — BREAKING: a caller matching on
   it needs a wildcard arm.)* Three variants were added during the 0.3 line,
