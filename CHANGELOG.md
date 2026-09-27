@@ -170,6 +170,24 @@ never does.
 
 ### Changed
 
+- **CI builds the public docs, and a broken intra-doc link is an error.**
+  *(#124)* `cargo build`, `cargo test` and `cargo clippy` all ignore intra-doc
+  links, so a link to a private item or to something renamed away was
+  invisible to every gate here. Measured on a tree with one deliberate
+  unresolved link: `cargo clippy --locked --all-targets -- -D warnings`
+  reported **0**, and `cargo doc` reported an error.
+
+  `RUSTDOCFLAGS: -D warnings`, because rustdoc's default is to warn and carry
+  on — which is how a page ships with its links dead and no failure anywhere.
+  The errors also mask each other, since rustdoc stops at the first failing
+  pass: the sibling `rust-img-qcow2` reached eight (qcow2#105) and fixing
+  those surfaced seven more. That is the argument for gating before there is a
+  backlog.
+
+  The step lives in the `fmt` job, which now clones `../rust-fs-core` for the
+  first time: `cargo doc` resolves the path dependency even though `cargo fmt`
+  does not. Nothing needed fixing — #123 cleared the one error that existed.
+
 - **`log::collect_replay_chain` returns `Result<Vec<LogEntry>>`, and the
   `Vec`-returning wrapper is gone rather than deprecated.** *(#41 —
   BREAKING.)* There were two functions: `collect_replay_chain_checked`, which
