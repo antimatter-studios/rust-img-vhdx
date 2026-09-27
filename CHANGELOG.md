@@ -7,7 +7,37 @@ never does.
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-09-27
+
 ### Added
+
+- **`tests/changelog.rs`: the release's own shape, checked rather than
+  remembered.** *(#63)* Five assertions, each of which was confirmed to fail
+  on a mutation rather than assumed to work:
+
+  - `[package].version` equals the newest `## [x.y.z]` section. A release is a
+    tag, a manifest version and a changelog section saying one thing; two of
+    those three are in this repository and can be compared.
+  - **a released section carrying `BREAKING` bumped the minor.** This is #63 as
+    an assertion. The judgement — is this breaking? — stays with whoever writes
+    the entry; the test insists an entry that already says so is not shipped as
+    a patch.
+  - each `## [...]` section uses a `### Heading` at most once.
+  - every released section has a `[x.y.z]: <url>` definition.
+  - the version parser reads a heading or skips it, never guesses. A heading it
+    misread would let a real release escape the checks above while they passed.
+
+  Two of those found existing defects on their first run: `[0.2.0]` carried two
+  `### Added` blocks, and the link definitions still compared `v0.3.4...HEAD`
+  with 0.3.5 released and no `[0.3.5]` definition at all — so that heading
+  rendered as literal brackets. Both fixed here.
+
+  #63 asks for a release-checklist item. This is the same idea written as
+  something that runs: it notes the identical mistake was found in
+  `rust-partitions` and `rust-fs-ext4` in the same month, and that a review bot
+  reported the duplicate-heading case in a sibling five times before anyone
+  acted. A convention five accurate reports did not enforce will not enforce
+  itself.
 
 - **The region, metadata, BAT and log parsers are fuzzed, on two tiers.**
   VHDX has more attacker-controlled indirection than any other format in
@@ -169,6 +199,21 @@ never does.
   capability test now happens after the chain is assembled.
 
 ### Changed
+
+- **`Error` is `#[non_exhaustive]`.** *(#63 — BREAKING: a caller matching on
+  it needs a wildcard arm.)* Three variants were added during the 0.3 line,
+  most recently `LogUnassembled` (#41), and each was a break that the changelog
+  had to be corrected for. With the attribute, the next one is not. Adding it
+  is itself breaking, which is why it lands in this bump rather than later as a
+  patch — doing it later would repeat the problem it removes.
+
+  **`Header` deliberately does not carry it.** `pub fn encode_header(h:
+  &Header)` means a downstream has no way to build one except by struct
+  literal, which `#[non_exhaustive]` forbids outright — it would make a public
+  function uncallable from outside the crate. A format structure's fields *are*
+  the format, so a new one there stays a minor bump, and
+  `a_released_section_that_breaks_api_bumped_the_minor` is what catches it
+  being released as a patch.
 
 - **CI builds the public docs, and a broken intra-doc link is an error.**
   *(#124)* `cargo build`, `cargo test` and `cargo clippy` all ignore intra-doc
@@ -359,16 +404,15 @@ never does.
 ### Added
 
 - Device-backed reader, log replay and the write path.
-
-### Added
-
 - Release-on-tag pipeline using trusted publishing, and CI (test, fmt, clippy).
 
 ### Changed
 
 - `am-fs-core` dependency moves to 0.2.
 
-[Unreleased]: https://github.com/antimatter-studios/rust-img-vhdx/compare/v0.3.4...HEAD
+[Unreleased]: https://github.com/antimatter-studios/rust-img-vhdx/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/antimatter-studios/rust-img-vhdx/compare/v0.3.5...v0.4.0
+[0.3.5]: https://github.com/antimatter-studios/rust-img-vhdx/compare/v0.3.4...v0.3.5
 [0.3.4]: https://github.com/antimatter-studios/rust-img-vhdx/compare/v0.3.3...v0.3.4
 [0.3.3]: https://github.com/antimatter-studios/rust-img-vhdx/compare/v0.3.2...v0.3.3
 [0.3.2]: https://github.com/antimatter-studios/rust-img-vhdx/compare/v0.3.1...v0.3.2

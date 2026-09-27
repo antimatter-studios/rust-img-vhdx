@@ -1,7 +1,25 @@
 use std::fmt;
 use std::io;
 
+/// Everything that can go wrong reading or writing a VHDX.
+///
+/// `#[non_exhaustive]`, SO THE NEXT VARIANT IS NOT A BREAKING CHANGE. A
+/// caller must carry a wildcard arm, and gains one as this grows rather than
+/// failing to compile. Three variants have been added in the 0.3 line -- most
+/// recently `LogUnassembled` (#41) -- and each one was a minor bump the
+/// changelog had to be corrected for (#63). Adding the attribute is itself
+/// breaking, which is why it lands in the 0.4.0 bump alongside them rather
+/// than later as a patch: doing it later would repeat the problem it removes.
+///
+/// `Header` deliberately does NOT carry it. `encode_header` takes a
+/// `&Header`, so a downstream that wants it has no way to build one except by
+/// struct literal -- which `#[non_exhaustive]` would forbid outright, making
+/// a public function uncallable. A format structure's fields *are* the format;
+/// a new one there stays a minor bump, and
+/// `a_released_section_that_breaks_api_bumped_the_minor` in
+/// `tests/changelog.rs` is what catches it being released as a patch.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum Error {
     Io(io::Error),
     /// File-identifier signature ("vhdxfile") is missing or wrong.
