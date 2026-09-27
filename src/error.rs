@@ -41,8 +41,33 @@ pub enum Error {
     /// alone is not this error — it says a writer stamped the file, not
     /// that anything is pending.
     LogNeedsReplay,
+    /// The log holds entries and which of them form the active chain
+    /// could not be determined. **Nothing has been written.**
+    ///
+    /// That last sentence is why this is not [`Error::LogReplay`]: this
+    /// error is returned before the first descriptor is applied, so the
+    /// image is exactly as it was found. Telling the two apart is the
+    /// difference between "reopen it elsewhere, or with a recovery tool"
+    /// and "this file is now half-changed".
+    ///
+    /// The condition is a head entry whose `tail` names no entry
+    /// discovery found. The format provides `tail` so a replayer does
+    /// not have to guess where a sequence began, and guessing is what
+    /// this refuses: the entry lowest in the region may belong to a run
+    /// the head has disowned, and applying it would write stale bytes
+    /// and then erase the log that still holds the live chain.
+    ///
+    /// It used to be an empty chain, indistinguishable from a log with
+    /// nothing to do — so `open` read the region table, the metadata and
+    /// the BAT out of the very bytes the log was going to fix, and
+    /// returned a reader serving pre-crash data with no error and no
+    /// signal (#41).
+    LogUnassembled(&'static str),
     /// Log replay failed mid-stream — image is in an inconsistent state
     /// the reader cannot safely interpret.
+    ///
+    /// Contrast [`Error::LogUnassembled`], which is refused *before*
+    /// anything is applied.
     LogReplay(String),
 }
 
@@ -77,6 +102,12 @@ impl fmt::Display for Error {
                 f,
                 "the log holds unreplayed entries and the device is read-only; \
                  reopen the image writable so the log can be applied"
+            ),
+            Error::LogUnassembled(s) => write!(
+                f,
+                "the log holds entries but its active chain could not be \
+                 assembled, so nothing was applied and the image is unchanged: \
+                 {s}"
             ),
             Error::LogReplay(s) => write!(f, "VHDX log replay failed: {s}"),
         }

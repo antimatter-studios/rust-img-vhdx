@@ -21,7 +21,7 @@ never does.
   The log target is the one worth having most: the log is a structure the
   format expects to be *partially written*, so it is parsed with a
   corruption tolerance the other structures do not have. It is fuzzed
-  with a non-zero GUID, because `collect_replay_chain_checked` returns an
+  with a non-zero GUID, because `collect_replay_chain` returns an
   empty chain immediately for an all-zero one — a target passing zeros
   would exercise one `if` and stop.
 
@@ -29,6 +29,40 @@ never does.
   anything, which is the format's floor rather than a choice, so one
   whole image is committed for the target that must open one and the rest
   are 64 KiB sections cut from three (#108).
+
+- `Error::LogUnassembled`, for a log that holds entries whose active chain
+  could not be worked out. *(#41 — BREAKING: a new `Error` variant, and
+  `log::collect_replay_chain` returns `Result<Vec<LogEntry>>`.)*
+
+  `open` applies the log before it reads the region table, the metadata and
+  the BAT, because those live in bytes the log may be part-way through
+  changing — `src/reader.rs`'s module doc says the order is not negotiable.
+  That argument was applied to the read-only branch, where a pending log on an
+  unwritable device is `Error::LogNeedsReplay`, and **not** to a chain that
+  could not be assembled: `select_chain` returned an empty `Vec` for it, which
+  is what a log with nothing pending returns, so `open` fell through and read
+  the stale bytes. The caller got a reader serving pre-crash data with no error
+  and no signal — a file that looks like its last writes were never made rather
+  than one that is damaged. Write to it and you write on top of a state the log
+  was mid-way through changing.
+
+  The condition is a head entry whose `tail` names no entry discovery found.
+  Declining to guess was always right — the entry lowest in the region may
+  belong to a run the head has disowned, and applying it would write stale
+  bytes and then erase the log holding the live chain. Reporting it is what was
+  missing.
+
+  Distinct from `Error::LogReplay` on purpose: **nothing has been written** when
+  this is returned, so the image is exactly as it was found. That is the
+  difference between "reopen it elsewhere, or with a recovery tool" and "this
+  file is now half-changed", and it is asserted — the test compares the whole
+  file byte for byte after the refused open.
+
+  qemu behaves as this crate used to, so this is a hardening item rather than a
+  divergence from the reference implementation. Refusing rather than reporting
+  via a flag, because this crate is a library other readers stack on and ships
+  no CLI of its own: a refusal can be relaxed into a report later without
+  anyone having lost data in the meantime, and the reverse is not true.
 
 - `Header::log_version` and the `header::LOG_VERSION_V0` constant.
 - `Error::LogNeedsReplay`, for a log that genuinely holds unapplied
@@ -135,6 +169,16 @@ never does.
   capability test now happens after the chain is assembled.
 
 ### Changed
+
+- **`log::collect_replay_chain` returns `Result<Vec<LogEntry>>`, and the
+  `Vec`-returning wrapper is gone rather than deprecated.** *(#41 —
+  BREAKING.)* There were two functions: `collect_replay_chain_checked`, which
+  `open` used, and `collect_replay_chain`, which was the same call with
+  `unwrap_or_default()` inside it. The second turned both refusals — a region
+  discovery could not finish examining (#73) and a chain that could not be
+  assembled (#41) — into the same empty vector a healthy log returns, from a
+  `pub` function. One function, one name, and a caller has to look at the
+  `Result`. `Ok(empty)` now means one thing only: the log has nothing to do.
 
 - **The qemu cross-validation target is gated by its feature, and linted.**
   *(#110)* `tests/qemu_validation.rs` opens with

@@ -28,6 +28,14 @@
 //! file, which is not the same as work waiting to be done — an image
 //! with a stale GUID and an empty chain opens read-only like any other.
 //!
+//! And a chain that cannot be assembled is `Error::LogUnassembled`, not
+//! an empty chain. The stale-data argument above does not depend on who
+//! is opening the file: if the log holds entries and which of them form
+//! the active chain is unknowable, the region table, the metadata and
+//! the BAT are being read out of bytes the log was part-way through
+//! changing, whether the opener could have written or not. Both branches
+//! refuse it now; the read-only one always did (#41).
+//!
 //! ## Regions this reader does not know
 //!
 //! The region table can name regions beyond the BAT and the metadata
@@ -51,9 +59,7 @@
 use crate::bat::{chunk_ratio as compute_chunk_ratio, data_bat_index, BatEntry, PayloadState};
 use crate::error::{Error, Result};
 use crate::header::{Header, HEADER1_OFFSET, HEADER2_OFFSET, HEADER_SIZE, LOG_VERSION_V0};
-use crate::log::{
-    apply_chain, collect_replay_chain_checked, encode_entry, PendingWrite, LOG_SECTOR_SIZE,
-};
+use crate::log::{apply_chain, collect_replay_chain, encode_entry, PendingWrite, LOG_SECTOR_SIZE};
 use crate::metadata::{
     item_ids, read_sector_size, read_virtual_disk_size, FileParameters, MetadataTable,
 };
@@ -410,7 +416,7 @@ impl VhdxReader {
             ];
             dev.read_at(header.log_offset, &mut log_bytes)
                 .map_err(fs_core_to_vhdx_error)?;
-            let chain = collect_replay_chain_checked(&log_bytes, &header.log_guid)?;
+            let chain = collect_replay_chain(&log_bytes, &header.log_guid)?;
             if !chain.is_empty() {
                 // WHETHER WE CAN WRITE IS ASKED HERE, NOT ABOVE.
                 //

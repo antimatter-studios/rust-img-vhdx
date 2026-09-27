@@ -129,7 +129,7 @@ fn targets() -> Vec<Target> {
             name: "log",
             cases: 128,
             run: |b| {
-                // NOT an all-zero GUID: `collect_replay_chain_checked`
+                // NOT an all-zero GUID: `collect_replay_chain`
                 // returns an empty chain immediately for one, which is
                 // how a cleanly-closed image says "nothing to replay".
                 // Passing zeros would exercise one `if` and stop.
@@ -140,7 +140,7 @@ fn targets() -> Vec<Target> {
                     guid[0] = 1;
                 }
                 let _ = vhdx::log::collect_replay_chain(b, &guid);
-                let _ = vhdx::log::collect_replay_chain_checked(b, &guid);
+                let _ = vhdx::log::collect_replay_chain(b, &guid);
             },
         },
     ]
