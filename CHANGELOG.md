@@ -98,6 +98,41 @@ never does.
 
 ### Changed
 
+- **The qemu cross-validation target is gated by its feature, and linted.**
+  *(#110)* `tests/qemu_validation.rs` opens with
+  `#![cfg(feature = "qemu-validation")]` and `Cargo.toml` had no `[[test]]`
+  entry for it, so `cargo test --locked --all-targets` — the debug matrix and
+  the release job — built an empty binary, ran it, and printed
+
+  ```text
+       Running tests/qemu_validation.rs
+  test result: ok. 0 passed; 0 failed; 0 ignored; ...
+  ```
+
+  a passing line under the cross-validation suite's own name for a run that
+  validated nothing. `0 passed` and `15 passed` read the same to anyone
+  scanning, and the executed-test floor cannot tell them apart either: it sums
+  `passed` counts and a zero adds nothing.
+
+  `required-features = ["qemu-validation"]` takes the target out of
+  `--all-targets`, so the line is **absent** rather than green — measured, the
+  debug tier's log no longer mentions `qemu_validation` at all.
+
+  That leaves the `qemu-validation` job as the only place the file is compiled
+  with its bodies present, so that job now lints it:
+  `cargo clippy --locked --features qemu-validation --test qemu_validation --
+  -D warnings`. `-D warnings` is enforced on every other target here and was
+  not enforced on the crate's only independent oracle. Demonstrated: a
+  deliberate `let _x = vec![1].len() == 0` in that file is **2 errors** under
+  the new step and **0** under `--all-targets`.
+
+  Two guards, so neither half can quietly go away again:
+  `tests/feature_gated_targets.rs` parses `Cargo.toml` and holds every
+  test target with a crate-level `#![cfg(feature = "...")]` to having a
+  matching `required-features`; `the_pr_gate_still_cross_validates_against_qemu_img`
+  in `tests/ci_profile.rs` gained a third assertion for the clippy step, with
+  six cases of its own covering the spellings that do and do not lint it.
+
 - **Allocation and log replay ask the device for room instead of writing
   past its end, and the `am-fs-core` pin moves to v0.2.13.** *(#111, #117)*
   Appending is the only way VHDX allocates, and it worked because a write
