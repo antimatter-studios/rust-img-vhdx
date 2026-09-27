@@ -19,28 +19,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: clone am-fs-core sibling
-        shell: bash
-        run: git clone --depth 1 --branch v0.2.10 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
-      - name: clone the core that provides the output-budget wrapper
-        # TWO CORE PINS, AND THEY ARE NOT THE SAME NUMBER. The clone above is
-        # the crate this one COMPILES against, and it cannot move: from
-        # v0.2.11 a write past the end of a FileDevice is a refusal rather
-        # than an implicit extension, and appending is how VHDX allocates.
-        # Measured on this branch, v0.2.11 and v0.2.13 each fail
-        # `a_sound_log_region_still_opens_and_writes` with OutOfBounds at the
-        # device's exact end -- see "The pin you cannot bump" in AGENTS.md and
-        # rust-fs-core#147/#129.
+        # ONE CLONE, SERVING BOTH THINGS CORE IS NEEDED FOR. It used to be
+        # two, at two different pins:
         #
-        # This clone is the core that provides scripts/output-budget.sh, which
-        # scripts/tier.sh resolves and verifies at run time now that no copy
-        # of it is committed here (rust-fs-core#153). It is a shell script
-        # this repository runs, not code it links, so nothing about the
-        # dependency's pin applies to it; v0.2.13 is the first release with
-        # the quiet-failure behaviour, and v0.2.11 the first that ships the
-        # file at all.
+        #   - the crate this one COMPILES against, held at v0.2.10 because
+        #     from v0.2.11 a write past the end of a FileDevice is a refusal
+        #     rather than an implicit extension (rust-fs-core#70, #75), and
+        #     appending was how VHDX allocated;
+        #   - the core that provides scripts/output-budget.sh, which
+        #     scripts/tier.sh resolves and verifies at run time now that no
+        #     copy of it is committed here (rust-fs-core#153), and which
+        #     cannot go below v0.2.13 -- the first release where a failing
+        #     tier is quiet.
         #
-        # The two collapse back into one clone the day this crate can build
-        # against a current core, and the FS_CORE_ROOT export goes with them.
+        # Allocation asks for the room with `set_len` now (#117), so the
+        # dependency can move to the pin the tooling already needed, and the
+        # two numbers become one.
         #
         # THE PATH IS EXPORTED FROM BASH, not built out of a
         # github.workspace expression: this job runs on windows-latest, where
@@ -49,8 +43,8 @@ jobs:
         # spelling the scripts can use.
         shell: bash
         run: |
-          git clone --depth 1 --branch v0.2.13 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core-budget
-          echo "FS_CORE_ROOT=$(cd ../rust-fs-core-budget && pwd)" >> "$GITHUB_ENV"
+          git clone --depth 1 --branch v0.2.13 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
+          echo "FS_CORE_ROOT=$(cd ../rust-fs-core && pwd)" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.95.0
@@ -136,16 +130,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: clone am-fs-core sibling
-        shell: bash
-        run: git clone --depth 1 --branch v0.2.10 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
-      - name: clone the core that provides the output-budget wrapper
-        # The second core pin: the wrapper scripts/tier.sh resolves. See the
-        # `test` job above for why it is not the same number as the
-        # dependency's.
+        # One clone, the path dependency AND the output-budget wrapper. See
+        # the `test` job above for why it used to be two.
         shell: bash
         run: |
-          git clone --depth 1 --branch v0.2.13 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core-budget
-          echo "FS_CORE_ROOT=$(cd ../rust-fs-core-budget && pwd)" >> "$GITHUB_ENV"
+          git clone --depth 1 --branch v0.2.13 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
+          echo "FS_CORE_ROOT=$(cd ../rust-fs-core && pwd)" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.95.0
@@ -205,16 +195,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: clone am-fs-core sibling
-        shell: bash
-        run: git clone --depth 1 --branch v0.2.10 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
-      - name: clone the core that provides the output-budget wrapper
-        # The second core pin: the wrapper scripts/tier.sh resolves. See the
-        # `test` job above for why it is not the same number as the
-        # dependency's.
+        # One clone, the path dependency AND the output-budget wrapper. See
+        # the `test` job above for why it used to be two.
         shell: bash
         run: |
-          git clone --depth 1 --branch v0.2.13 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core-budget
-          echo "FS_CORE_ROOT=$(cd ../rust-fs-core-budget && pwd)" >> "$GITHUB_ENV"
+          git clone --depth 1 --branch v0.2.13 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
+          echo "FS_CORE_ROOT=$(cd ../rust-fs-core && pwd)" >> "$GITHUB_ENV"
       - name: install qemu-utils
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-utils
       - uses: dtolnay/rust-toolchain@stable

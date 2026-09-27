@@ -662,6 +662,28 @@ pub fn apply_chain(dev: &Arc<dyn BlockDevice>, chain: &[LogEntry]) -> Result<()>
         }
     }
 
+    // NOW MAKE THE ROOM, ONCE, BEFORE THE FIRST WRITE.
+    //
+    // Everything above is a bound; nothing above has touched the device.
+    // `dev_size` is the extent the loop just proved every descriptor fits
+    // inside, so extending to it is enough for the whole chain -- and it is
+    // also `last_file_offset` itself, so the file ends where the log says it
+    // ends without a write placed there to make it that long.
+    //
+    // A write past the end is refused rather than granted (rust-fs-core#70,
+    // #75): the growth a post-crash chain needs has to be asked for, and
+    // `set_len` is how (rust-fs-core#161). A device that cannot grow says so
+    // here, before any of the chain has landed, rather than part-way through.
+    if dev_size > dev.size_bytes() {
+        dev.set_len(dev_size).map_err(|e| {
+            Error::LogReplay(format!(
+                "the chain describes {dev_size} bytes and this device holds {}, \
+                 which could not be extended: {e}",
+                dev.size_bytes()
+            ))
+        })?;
+    }
+
     for entry in chain {
         for d in &entry.descriptors {
             match d {
@@ -690,19 +712,17 @@ pub fn apply_chain(dev: &Arc<dyn BlockDevice>, chain: &[LogEntry]) -> Result<()>
             .map_err(|e| Error::LogReplay(format!("flush after entry: {e}")))?;
     }
 
-    // UP TO `last_file_offset`, as the reference implementation truncates
-    // up after applying. The chain can name a block past every byte a
-    // descriptor wrote -- an allocation logs only the BAT sector -- and a
-    // crash before the block's zeros landed leaves the file short of it.
-    // One zero byte at the last offset makes it that long; everything it
-    // skips over reads as zeros, which is what an unwritten block holds.
-    let written = dev.size_bytes().max(descriptor_extent(chain));
-    let wanted = replayed_extent(dev.size_bytes(), chain);
-    if wanted > written {
-        dev.write_at(wanted - 1, &[0])
-            .and_then(|()| dev.flush())
-            .map_err(|e| Error::LogReplay(format!("extending to last_file_offset: {e}")))?;
-    }
+    // THE FILE ALREADY ENDS AT `last_file_offset`, because `set_len` above
+    // put it there.
+    //
+    // The chain can name a block past every byte a descriptor wrote -- an
+    // allocation logs only the BAT sector -- and a crash before the block's
+    // zeros landed leaves the file short of it, which the reference
+    // implementation fixes by truncating UP after applying. This used to be
+    // a one-byte write at `wanted - 1`, purely to make the file that long;
+    // everything it skipped over read as zeros, which is what an unwritten
+    // block holds. `set_len` says the same thing without a write standing in
+    // for it, and says it before the chain lands rather than after.
     Ok(())
 }
 
@@ -941,6 +961,79 @@ mod tests {
             let start = offset as usize;
             m[start..start + buf.len()].copy_from_slice(buf);
             Ok(())
+        }
+        fn is_writable(&self) -> bool {
+            true
+        }
+    }
+
+    /// The same device, but one that can be asked to grow -- and that
+    /// REFUSES a write ending past where it currently ends, the way
+    /// `FileDevice` does (rust-fs-core#70, #75).
+    ///
+    /// `MemDevice` above takes `set_len`'s default, `Err(ReadOnly)`, so it is
+    /// the device that cannot grow. This one is the pair to it: between them
+    /// a test can tell "the replay extended the device" from "the replay got
+    /// away with writing past its end", which a double that grows on write
+    /// cannot distinguish at all.
+    struct GrowableMem {
+        bytes: std::sync::Mutex<Vec<u8>>,
+        extensions: std::sync::atomic::AtomicUsize,
+    }
+
+    impl GrowableMem {
+        fn filled(len: usize, fill: u8) -> Arc<GrowableMem> {
+            Arc::new(GrowableMem {
+                bytes: std::sync::Mutex::new(vec![fill; len]),
+                extensions: std::sync::atomic::AtomicUsize::new(0),
+            })
+        }
+        fn len(&self) -> usize {
+            self.bytes.lock().unwrap().len()
+        }
+        fn byte_at(&self, off: u64) -> u8 {
+            self.bytes.lock().unwrap()[off as usize]
+        }
+        fn extensions(&self) -> usize {
+            self.extensions.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl fs_core::BlockRead for GrowableMem {
+        fn read_at(&self, offset: u64, buf: &mut [u8]) -> fs_core::Result<()> {
+            let m = self.bytes.lock().unwrap();
+            let start = offset as usize;
+            buf.copy_from_slice(&m[start..start + buf.len()]);
+            Ok(())
+        }
+        fn size_bytes(&self) -> u64 {
+            self.bytes.lock().unwrap().len() as u64
+        }
+    }
+
+    impl BlockDevice for GrowableMem {
+        fn write_at(&self, offset: u64, buf: &[u8]) -> fs_core::Result<()> {
+            let mut m = self.bytes.lock().unwrap();
+            let end = offset + buf.len() as u64;
+            if end > m.len() as u64 {
+                return Err(fs_core::Error::OutOfBounds {
+                    offset,
+                    len: buf.len() as u64,
+                    size: m.len() as u64,
+                });
+            }
+            let start = offset as usize;
+            m[start..start + buf.len()].copy_from_slice(buf);
+            Ok(())
+        }
+        fn set_len(&self, new_len: u64) -> fs_core::Result<()> {
+            self.extensions
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.bytes.lock().unwrap().resize(new_len as usize, 0);
+            Ok(())
+        }
+        fn can_grow(&self) -> bool {
+            true
         }
         fn is_writable(&self) -> bool {
             true
@@ -1490,6 +1583,114 @@ mod tests {
         assert!(
             apply_chain(&dev, &chain).is_err(),
             "replay wrote a sector at byte 2^40 of a 4 MiB device"
+        );
+    }
+
+    /// THE FILE IS EXTENDED, NOT WRITTEN PAST THE END OF.
+    ///
+    /// A crash mid-allocation leaves a log naming a block the file is not
+    /// long enough to hold, and the replay has to make it that long -- the
+    /// reference implementation truncates up to `last_file_offset` after
+    /// applying. This crate used to do it with a one-byte write at
+    /// `wanted - 1`, which only worked while a write past the end grew the
+    /// file underneath it; `write_at` refuses that now (rust-fs-core#70,
+    /// #75), so the growth is asked for with `set_len` (#117).
+    ///
+    /// The double here refuses an out-of-bounds write exactly as
+    /// `FileDevice` does, so a replay that reached for the old trick fails
+    /// this test rather than passing it quietly.
+    #[test]
+    fn a_chain_that_grows_the_file_is_extended_rather_than_written_past_its_end() {
+        const SIZE: u64 = 4 * 1024 * 1024;
+        let mut region = vec![0u8; TEST_REGION_LEN];
+        // One sector inside the device, and a `last_file_offset` a block
+        // past its end: the allocation whose zeros never landed.
+        let grown = SIZE + u64::from(LOG_SECTOR_SIZE as u32);
+        splice(
+            &mut region,
+            0,
+            &encode_entry(
+                1,
+                0,
+                &LIVE_GUID,
+                0,
+                grown,
+                &[PendingWrite {
+                    file_offset: 1024 * 1024,
+                    sector: vec![0x5Au8; LOG_SECTOR_SIZE],
+                }],
+            ),
+        );
+        let chain = collect_replay_chain(&region, &LIVE_GUID);
+        assert_eq!(chain.len(), 1, "the entry itself is well formed");
+
+        let dev = GrowableMem::filled(SIZE as usize, 0xCC);
+        let as_dev: Arc<dyn BlockDevice> = dev.clone();
+        apply_chain(&as_dev, &chain).expect("a chain that grows the file replays");
+
+        assert_eq!(
+            dev.len() as u64,
+            grown,
+            "the replay left the file short of the offset its log named"
+        );
+        assert_eq!(
+            dev.extensions(),
+            1,
+            "the device was extended once, before the first write, rather \
+             than per descriptor"
+        );
+        assert_eq!(
+            dev.byte_at(1024 * 1024),
+            0x5A,
+            "the descriptor did not land"
+        );
+        assert_eq!(
+            dev.byte_at(SIZE),
+            0,
+            "the bytes the extension added read as something other than zeros"
+        );
+    }
+
+    /// AND A DEVICE THAT CANNOT GROW SAYS SO BEFORE ANY OF THE CHAIN LANDS.
+    ///
+    /// `set_len` defaults to `Err(ReadOnly)`, so this is every device that
+    /// has not opted in. The refusal has to come first: a chain applied as
+    /// far as the descriptor that needed the room and then abandoned is the
+    /// half-written image the whole up-front bound exists to prevent.
+    #[test]
+    fn a_chain_needing_room_on_a_device_that_cannot_grow_is_refused_before_anything_lands() {
+        const SIZE: u64 = 4 * 1024 * 1024;
+        let mut region = vec![0u8; TEST_REGION_LEN];
+        let grown = SIZE + u64::from(LOG_SECTOR_SIZE as u32);
+        splice(
+            &mut region,
+            0,
+            &encode_entry(
+                1,
+                0,
+                &LIVE_GUID,
+                0,
+                grown,
+                &[PendingWrite {
+                    file_offset: 1024 * 1024,
+                    sector: vec![0x5Au8; LOG_SECTOR_SIZE],
+                }],
+            ),
+        );
+        let chain = collect_replay_chain(&region, &LIVE_GUID);
+
+        let dev = MemDevice::filled(SIZE as usize, 0xCC);
+        let err = apply_chain(&dev, &chain)
+            .expect_err("a device that cannot grow accepted a chain that needs it to");
+        let text = format!("{err}");
+        assert!(
+            text.contains("could not be extended"),
+            "the refusal does not say the device could not be extended: {text}"
+        );
+        assert_eq!(
+            MemDevice::byte_at(&dev, 1024 * 1024),
+            0xCC,
+            "a descriptor landed before the refusal"
         );
     }
 

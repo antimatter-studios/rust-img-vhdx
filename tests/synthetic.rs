@@ -1045,6 +1045,17 @@ impl fs_core::BlockDevice for CountsLogWrites {
     fn is_writable(&self) -> bool {
         true
     }
+    // FORWARDED, BECAUSE THE DEFAULTS ARE A REFUSAL. `set_len` defaults to
+    // `Err(ReadOnly)` and `can_grow` to `false`, so a wrapper that leaves
+    // them out turns a growable device into one that cannot allocate -- and
+    // this double only means to count bytes, not to change what the device
+    // can do.
+    fn set_len(&self, new_len: u64) -> fs_core::Result<()> {
+        fs_core::BlockDevice::set_len(&self.inner, new_len)
+    }
+    fn can_grow(&self) -> bool {
+        fs_core::BlockDevice::can_grow(&self.inner)
+    }
 }
 
 /// A journalled write records its entry and nothing else in the log region
@@ -1120,6 +1131,27 @@ impl fs_core::BlockDevice for CutAfter {
     }
     fn is_writable(&self) -> bool {
         true
+    }
+    /// AN EXTENSION SPENDS THE BUDGET, like a write does.
+    ///
+    /// Allocating a block now asks for the room before it writes into it
+    /// (#117), so the extension is one more device operation the power can
+    /// go out during -- and the crash point it creates is the interesting
+    /// one: the BAT entry reaches the log naming a block the file is not
+    /// long enough to hold, which is the shape the replay's own extension
+    /// exists for. Reporting `Ok(())` after dropping it is the same lie as
+    /// for a write: the call returned, the device did not change.
+    fn set_len(&self, new_len: u64) -> fs_core::Result<()> {
+        let n = self
+            .writes
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if n < self.budget {
+            fs_core::BlockDevice::set_len(&self.inner, new_len)?;
+        }
+        Ok(())
+    }
+    fn can_grow(&self) -> bool {
+        fs_core::BlockDevice::can_grow(&self.inner)
     }
 }
 
@@ -1209,4 +1241,94 @@ fn a_journalled_write_cut_anywhere_reopens_as_before_or_after() {
         replayed_cuts > 0,
         "no cut left the BAT update only in the log for the reopen to replay"
     );
+}
+
+/// THE BAT NEVER NAMES BYTES THE FILE DOES NOT HAVE.
+///
+/// `VhdxReader`'s `dev_size` is the allocation lock: a writer picks the tail
+/// under it and claims it, and `host_offset` then reads that number as the
+/// bound on where bytes exist. Before #117 the claim came first and the
+/// bytes followed — the write past the end was what made the file that long,
+/// so between the two the number named bytes that were not there yet. A
+/// refused write left it that way permanently.
+///
+/// Stated as something a reader outside the crate can check: after an
+/// allocating write, the host offset the BAT hands out must be backed by
+/// file. A fresh read-only open reads the block back, which it cannot do if
+/// the file is short of it.
+#[test]
+fn an_allocation_leaves_the_file_long_enough_for_the_block_the_bat_names() {
+    let path = tmp_path("alloc_extends_the_file");
+    build_big_vhdx(&path, &pattern_block(11));
+
+    // Block 1 is unallocated in the fixture, so this write allocates it.
+    let payload = [0x77u8; 8192];
+    {
+        let r = VhdxReader::open_rw(&path).expect("open read-write");
+        r.write_at(u64::from(BIG_BLOCK_SIZE), &payload)
+            .expect("a write into an unallocated block allocates it");
+        r.flush().unwrap();
+    }
+
+    // What the BAT now says about block 1, read straight out of the file.
+    let raw = std::fs::read(&path).unwrap();
+    let bat_1 = BIG_BAT_OFFSET as usize + 8;
+    let entry = u64::from_le_bytes(raw[bat_1..bat_1 + 8].try_into().unwrap());
+    assert_eq!(
+        entry & 7,
+        6,
+        "block 1's BAT entry does not say FullyPresent"
+    );
+    let host_off = entry & !((1u64 << 20) - 1);
+    assert!(
+        host_off >= BIG_TOTAL_FILE_SIZE,
+        "the allocation reused space inside the fixture, so it never had to \
+         grow the file and this test proves nothing: host_off = {host_off}"
+    );
+    assert!(
+        raw.len() as u64 >= host_off + u64::from(BIG_BLOCK_SIZE),
+        "the BAT names a block at {host_off} running to {}, and the file is \
+         only {} bytes long",
+        host_off + u64::from(BIG_BLOCK_SIZE),
+        raw.len()
+    );
+
+    // And the bytes are readable through a reader that knows nothing of the
+    // write, which is the same claim from the other side.
+    let r = VhdxReader::open(&path).expect("the image reopens");
+    let mut got = vec![0u8; payload.len()];
+    r.read_at(u64::from(BIG_BLOCK_SIZE), &mut got).unwrap();
+    assert_eq!(got, payload, "the allocated block does not read back");
+    let _ = std::fs::remove_file(&path);
+}
+
+/// A VHDX EXPOSED AS A BLOCK DEVICE DOES NOT GROW, AND SAYS SO.
+///
+/// `can_grow` defaults to `false`, so this would be the answer either way —
+/// which is exactly why it is asserted. The guest disk is `virtual_size()`
+/// long, and that number lives in the metadata region: growing it means
+/// rewriting that region and the BAT sized from it, not writing past the
+/// end. A filesystem layered on this device has to be told before it tries.
+#[test]
+fn a_vhdx_does_not_offer_to_grow_the_disk_inside_it() {
+    let path = tmp_path("vhdx_does_not_grow");
+    build_big_vhdx(&path, &pattern_block(12));
+    let r = VhdxReader::open_rw(&path).expect("open read-write");
+
+    assert!(
+        !fs_core::BlockDevice::can_grow(&r),
+        "a VHDX offered to grow the disk inside it"
+    );
+    let bigger = fs_core::BlockRead::size_bytes(&r) + u64::from(BIG_BLOCK_SIZE);
+    assert!(
+        fs_core::BlockDevice::set_len(&r, bigger).is_err(),
+        "set_len on a VHDX reported success without the guest disk changing size"
+    );
+    assert_eq!(
+        fs_core::BlockRead::size_bytes(&r),
+        r.virtual_size(),
+        "the device's size stopped being the disk's virtual size"
+    );
+    drop(r);
+    let _ = std::fs::remove_file(&path);
 }
