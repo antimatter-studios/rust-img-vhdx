@@ -98,6 +98,48 @@ never does.
 
 ### Changed
 
+- **Allocation and log replay ask the device for room instead of writing
+  past its end, and the `am-fs-core` pin moves to v0.2.13.** *(#111, #117)*
+  Appending is the only way VHDX allocates, and it worked because a write
+  past the end of a `FileDevice` grew the file underneath it.
+  rust-fs-core#75 made that a refusal — rightly, since `size_bytes()` went
+  on reporting the length taken at construction while the file grew, so the
+  two halves of one device disagreed about where it ended
+  (rust-fs-core#70) — and the pin sat six releases behind because of it.
+  Measured: 8 failures against core `main`, 0 against v0.2.10, every one a
+  write landing at the device's exact end.
+
+  `BlockDevice::set_len` (rust-fs-core#161) is the room asked for out loud,
+  and it is called in the two places that grow the file:
+
+  - `VhdxReader::allocate_block_for` extends to the new tail **before** the
+    zero-init write and **under the `dev_size` lock**, so the number
+    `host_offset` and `journal_sector_write` read as the device's bound
+    never names bytes the device does not have. A refused extension now
+    leaves that bound describing the device that is really there, where
+    before it was raised first and stayed raised.
+  - `log::apply_chain` extends **once, up front**, to the bound its
+    descriptor check has already enforced. That bound is
+    `last_file_offset`, so the file ends where the log says it ends and the
+    one-byte write at `wanted - 1` that used to extend it is gone. A device
+    that cannot grow is refused there, before any descriptor lands, rather
+    than part-way through a chain.
+
+  `VhdxReader`'s own `impl BlockDevice` answers `can_grow() == false`
+  explicitly: the guest disk's length lives in the metadata region, so
+  growing it is not something a caller can ask for by writing past the end.
+
+  Both trait methods are **defaulted** to a refusal, so a wrapping device
+  that omits them turns a growable device into one that cannot allocate.
+  The doubles in `tests/synthetic.rs` forward both; `CutAfter` spends its
+  crash budget on `set_len` as well, because a lost extension is a crash
+  point of its own — the BAT entry reaches the log naming a block the file
+  is not long enough to hold, which is the shape replay's extension exists
+  for.
+
+  `ci.yml` cloned core twice at two different pins, the dependency's and
+  the output-budget wrapper's. Both are v0.2.13 now, so it clones once.
+
 - **One required check, `ci-ok`, stands for every job in `ci.yml`.**
   Branch protection named six job names by hand — `fmt`,
   `qemu-validation`, the three `test / <os>` matrix legs and

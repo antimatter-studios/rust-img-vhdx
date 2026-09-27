@@ -172,42 +172,37 @@ and **refuse a short buffer** with `Error::Corrupt` (#113). They are not given a
 fixed-size array parameter on purpose: the fuzz targets hand them raw bytes, and
 a signature that cannot take a short slice cannot be fuzzed with one.
 
-## The pin you cannot bump, and why
+## How this format allocates, and why it asks first
 
-This crate depends on `am-fs-core` and is **pinned to `v0.2.10`**, one release
-behind, and that is deliberate.
+Appending is the only way VHDX allocates: put a block at the tail, then record
+where it went. That used to work because a write past the end of a
+`FileDevice` grew the file underneath it — and rust-fs-core#75 stopped it,
+correctly: `size_bytes()` went on reporting the construction-time length while
+the file grew, so `CachingDevice` could serve bytes no cached read could reach
+(rust-fs-core#70). The pin sat at `v0.2.10` for six releases because of it.
 
-`4e19fc9` (rust-fs-core#75) made a write past the end of a `FileDevice` a
-refusal rather than an implicit extension. It was right to — `size_bytes()`
-reported the construction-time length while the file grew underneath it, so
-`CachingDevice` could serve bytes no cached read could reach (#70). But writing
-past the end was **the only way this format allocates**: append a block, cluster
-or grain, then record where it went.
+`BlockDevice::set_len` (rust-fs-core#161, v0.2.12) is the replacement, and
+this crate calls it in the two places that grow the file (#117):
 
-Measured against core `main`: vhd 7 failures, qcow2 3, vhdx 1, vmdk 1; zero
-against `v0.2.10`. Every one is a write landing exactly at the device's current
-end.
+- `VhdxReader::allocate_block_for` — extends to the new tail **before** the
+  zero-init write, under the `dev_size` lock, so the lock never names bytes
+  the device does not have. Order matters: the file grows first, the bound
+  second, and a refusal leaves the bound describing what is really there.
+- `log::apply_chain` — one extension, up front, to the bound the descriptor
+  check has already enforced. That bound *is* `last_file_offset`, so the file
+  ends where the log says it ends, and the one-byte write at `wanted - 1` that
+  used to put it there is gone.
 
-Do **not** bump the pin, and do **not** "fix" it by reverting #75 — that
-reintroduces #70. Tracked as rust-fs-core#147/#129 and, on this side, #111 and
-#117; the agreed replacement is `BlockDevice::set_len` plus `can_grow()`,
-which core has had since v0.2.12 and this crate does not yet call. Re-measured
-on 2026-09-26: core v0.2.11 and v0.2.13 each fail
-`a_sound_log_region_still_opens_and_writes` with `OutOfBounds { offset:
-67108864, len: 1048576, size: 67108864 }` — one write, landing at the device's
-exact end.
+Both methods are **defaulted** on the trait — `set_len` to `Err(ReadOnly)`,
+`can_grow` to `false` — so a wrapping device that does not forward them turns
+a growable device into one that cannot allocate, silently. Every double in
+`tests/` that wraps a `FileDevice` forwards both; `CutAfter` deliberately
+spends its crash budget on `set_len` too, because a lost extension is a crash
+point of its own.
 
-This pin is about the crate this one LINKS. The `scripts/output-budget.sh`
-that `scripts/tier.sh` runs is a shell script, comes from a different core
-checkout, and is pinned separately — see "Two core pins" below.
-
-One practical consequence: `pre-commit.d/rust-clippy.sh` runs clippy without
-`--locked`, so a `../rust-fs-core` checkout that is semver-ahead of the pin
-rewrites your unstaged `Cargo.lock`, and `rust-deps-pinned.sh` then blocks the
-commit over a file the commit never contained. That is a livelock
-(agent-skills#64). Work from a throwaway worktree with `../rust-fs-core` at
-`v0.2.10` rather than reaching for `--no-verify`, which disables every guard at
-once.
+`VhdxReader`'s own `impl BlockDevice` answers `can_grow() == false`
+explicitly, not by omission: the guest disk's length is in the metadata
+region, so growing it is not something a caller can ask for by writing.
 
 ## The output budget comes from rust-fs-core, at run time
 
@@ -239,20 +234,18 @@ not read the old name, and setting it does nothing at all — no error, the run
 simply stays quiet. If `--verbose` ever stops streaming, that is the first
 thing to check.
 
-### Two core pins, and why they are different numbers
+### One core pin now, where there used to be two
 
-The crate is **compiled** against `am-fs-core` v0.2.10 and cannot move, for
-the reason above. The **wrapper** comes from v0.2.13 — the first release with
-the quiet-failure behaviour, where v0.2.11 is the first that ships the script
-at all — and `ci.yml` clones that separately into `../rust-fs-core-budget`,
-exporting `FS_CORE_ROOT` for the tier steps. A shell script this repository
-runs is not code it links, so the dependency's pin has nothing to say about
-it.
+`ci.yml` clones `../rust-fs-core` once, at **v0.2.13**, and exports
+`FS_CORE_ROOT` at it. That is both the crate this one compiles against and the
+checkout the wrapper comes from.
 
-Locally the same split applies: a `../rust-fs-core` pinned at v0.2.10 has no
-wrapper, so `tier.sh` will refuse to start until `FS_CORE_ROOT` names a
-checkout that has one. The two pins collapse back into one the day this crate
-can build against a current core — see #111 and #117.
+It was two clones at two numbers: the dependency held at v0.2.10 by the
+allocation problem above, and the wrapper needing v0.2.13 — the first release
+with the quiet-failure behaviour, where v0.2.11 is the first that ships the
+script at all. A shell script this repository runs is not code it links, so
+the two pins were genuinely independent. #117 moved the dependency to the
+number the tooling already needed, and they became one.
 
 ## What gates a merge
 

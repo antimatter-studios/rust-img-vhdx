@@ -77,6 +77,19 @@ pub struct VhdxReader {
     dev: Arc<dyn BlockDevice>,
     /// Current device size — kept in sync with allocations because
     /// allocations grow the file at the tail.
+    ///
+    /// NOT A CACHE OF `dev.size_bytes()`, though it holds the same number.
+    /// It is the ALLOCATION LOCK: `allocate_block_for` picks the tail and
+    /// claims it under this mutex, which is what stops two writers handing
+    /// out the same host offset. `size_bytes()` answers the same question
+    /// with no such serialisation, so it cannot replace this.
+    ///
+    /// The number it holds must equal the device's length, because
+    /// `host_offset` and `journal_sector_write` read it as the bound on
+    /// where bytes exist. Since #117 the device is extended with `set_len`
+    /// before this is raised, so it never names bytes that are not there —
+    /// `the_allocation_lock_never_names_bytes_the_device_does_not_have`
+    /// asserts it.
     dev_size: Mutex<u64>,
     /// Decoded header (the slot with the higher sequence_number).
     header: Mutex<Header>,
@@ -915,6 +928,26 @@ impl VhdxReader {
         let aligned = (*sz + (block_size - 1)) & !(block_size - 1);
         let new_block_off = aligned;
         let new_dev_size = new_block_off + block_size;
+
+        // ASK FOR THE ROOM, RATHER THAN LETTING THE WRITE TAKE IT.
+        //
+        // The zero-init below ends at exactly `new_dev_size`, one block past
+        // where the device currently ends, and `write_at` refuses a write
+        // that ends past `size_bytes()` -- rust-fs-core#70 and #75, where a
+        // growing file and a fixed `size_bytes()` meant the two halves of
+        // one device disagreed about where it ended. `set_len` is the growth
+        // asked for out loud (rust-fs-core#161), and it is the only reason
+        // this allocation used to work.
+        //
+        // ORDER MATTERS, AND SO DOES THE LOCK. `dev_size` is what
+        // `host_offset` and `journal_sector_write` read as the device's
+        // bound, so it may never name bytes the device does not have yet:
+        // the file grows first, the bound second, both under the one lock.
+        // A refusal therefore leaves `dev_size` describing the device that
+        // is actually there.
+        self.dev
+            .set_len(new_dev_size)
+            .map_err(fs_core_to_vhdx_error)?;
         *sz = new_dev_size;
         drop(sz);
 
@@ -1371,6 +1404,18 @@ impl fs_core::BlockDevice for VhdxReader {
     }
     fn is_writable(&self) -> bool {
         VhdxReader::is_writable(self)
+    }
+    /// SPELLED OUT RATHER THAN DEFAULTED, so the answer is a decision and
+    /// not an omission.
+    ///
+    /// A guest disk exposed through this device is `virtual_size()` long,
+    /// and that number is in the image's metadata region — growing it means
+    /// rewriting that region and the BAT sized from it, which is not
+    /// something a caller can ask for by writing past the end. `set_len`
+    /// keeps its default, `Err(ReadOnly)`, and a filesystem layered on a
+    /// VHDX is told up front that this device does not grow.
+    fn can_grow(&self) -> bool {
+        false
     }
 }
 
