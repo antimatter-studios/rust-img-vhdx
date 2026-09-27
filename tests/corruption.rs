@@ -71,7 +71,6 @@ fn valid_image_opens_as_baseline() {
     let mut buf = [0u8; 16];
     r.read_at(0, &mut buf).unwrap();
     assert_eq!(buf[1], 1);
-    let _ = std::fs::remove_file(&path);
 }
 
 /// `log_version` says which log format the file uses. Version 0 is the
@@ -100,7 +99,6 @@ fn an_unknown_log_version_is_unsupported_not_replayed() {
         Err(other) => panic!("expected Unsupported, got {other:?}"),
         Ok(_) => panic!("opened an image whose log format we cannot parse"),
     }
-    let _ = std::fs::remove_file(&path);
 }
 
 /// The refusal is not gated on the log being dirty. This fixture's
@@ -117,7 +115,6 @@ fn an_unknown_log_version_is_refused_even_with_an_empty_log() {
         .err()
         .expect("expected Unsupported, got Ok");
     assert!(matches!(err, Error::Unsupported(_)), "got {err:?}");
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -129,7 +126,6 @@ fn not_a_vhdx_when_file_identifier_is_wrong() {
         .err()
         .expect("expected NotVhdx, got Ok");
     assert!(matches!(err, Error::NotVhdx), "got {err:?}");
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -143,7 +139,6 @@ fn both_header_slots_invalid_yields_no_valid_header() {
         .err()
         .expect("expected NoValidHeader, got Ok");
     assert!(matches!(err, Error::NoValidHeader), "got {err:?}");
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -166,7 +161,6 @@ fn falls_back_to_header2_when_header1_crc_is_invalid() {
     let mut buf = [0u8; 4];
     r.read_at(0, &mut buf).unwrap();
     assert_eq!(buf, [0, 1, 2, 3]);
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -186,7 +180,6 @@ fn opens_with_two_valid_header_slots() {
     let mut buf = [0u8; 8];
     r.read_at(0, &mut buf).unwrap();
     assert_eq!(buf, [0, 1, 2, 3, 4, 5, 6, 7]);
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -200,7 +193,6 @@ fn both_region_tables_invalid_yields_no_valid_region_table() {
         .err()
         .expect("expected NoValidRegionTable, got Ok");
     assert!(matches!(err, Error::NoValidRegionTable), "got {err:?}");
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -212,7 +204,6 @@ fn bad_metadata_signature_is_rejected() {
         .err()
         .expect("expected BadMetadata, got Ok");
     assert!(matches!(err, Error::BadMetadata(_)), "got {err:?}");
-    let _ = std::fs::remove_file(&path);
 }
 
 /// A region entry's `Required` flag is a hard gate: a region whose GUID
@@ -241,7 +232,6 @@ fn an_unknown_required_region_is_unsupported() {
         Err(other) => panic!("expected Unsupported, got {other:?}"),
         Ok(_) => panic!("opened an image carrying a region we cannot honour"),
     }
-    let _ = std::fs::remove_file(&path);
 }
 
 /// The same region with the flag clear is the format saying "ignore me
@@ -259,7 +249,6 @@ fn an_unknown_optional_region_is_ignored() {
     r.read_at(0, &mut buf).unwrap();
     assert_eq!(buf[1], 1);
     drop(r);
-    let _ = std::fs::remove_file(&path);
 }
 
 /// Add a region entry to the table at `table_offset` and repair its
@@ -324,7 +313,6 @@ fn falls_back_to_header2_when_header1_version_is_unsupported() {
     let mut buf = [0u8; 4096];
     reader.read_at(0, &mut buf).unwrap();
     assert!(buf.iter().all(|byte| *byte == 0xEE));
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -340,7 +328,6 @@ fn unsupported_logical_sector_size_is_rejected() {
         err,
         Error::Corrupt("sector_size must be 512 or 4096")
     ));
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -351,7 +338,6 @@ fn accepts_4096_logical_sector_size() {
 
     let reader = VhdxReader::open(&path).expect("4096-byte sectors are valid VHDX");
     assert_eq!(reader.sector_size(), 4096);
-    let _ = std::fs::remove_file(&path);
 }
 
 // ---------------------------------------------------------------------------
@@ -367,7 +353,7 @@ fn accepts_4096_logical_sector_size() {
 
 /// Build the four-block fixture with `log_offset` and `log_length`
 /// replaced, leaving `log_guid` at zero so the image looks clean.
-fn big_vhdx_with_log_region(name: &str, log_offset: u64, log_length: u32) -> std::path::PathBuf {
+fn big_vhdx_with_log_region(name: &str, log_offset: u64, log_length: u32) -> TempPath {
     let path = tmp_path(name);
     let block = pattern_block(3);
     build_big_vhdx(&path, &block);
@@ -399,7 +385,6 @@ fn a_log_region_over_the_metadata_region_is_refused_at_open() {
         before,
         "the refusal must not have touched the file"
     );
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -409,7 +394,6 @@ fn a_log_region_over_the_bat_region_is_refused_at_open() {
         .err()
         .expect("a log region on top of the BAT must be refused");
     assert!(matches!(err, Error::Corrupt(_)), "got {err:?}");
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -422,7 +406,6 @@ fn a_log_region_inside_the_header_section_is_refused_at_open() {
         .err()
         .expect("a log region inside the header section must be refused");
     assert!(matches!(err, Error::Corrupt(_)), "got {err:?}");
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -437,7 +420,6 @@ fn a_log_region_that_is_not_megabyte_aligned_is_refused_at_open() {
         .err()
         .expect("a log region off the megabyte grid must be refused");
     assert!(matches!(err, Error::Corrupt(_)), "got {err:?}");
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -449,7 +431,6 @@ fn a_log_region_whose_length_is_not_a_whole_megabyte_is_refused_at_open() {
         .err()
         .expect("a log length that is not a whole number of megabytes must be refused");
     assert!(matches!(err, Error::Corrupt(_)), "got {err:?}");
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -458,7 +439,6 @@ fn a_sound_log_region_somewhere_else_in_the_file_still_opens() {
     // aligned and a whole megabyte long, is legal.
     let path = big_vhdx_with_log_region("log_elsewhere", 10 * ONE_MIB, BIG_LOG_LENGTH);
     VhdxReader::open(&path).expect("an aligned log region that overlaps nothing is legal");
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
@@ -468,7 +448,6 @@ fn a_log_region_reaching_past_the_end_of_the_file_is_refused_at_open() {
         .err()
         .expect("a log region past the end of the file must be refused");
     assert!(matches!(err, Error::Corrupt(_)), "got {err:?}");
-    let _ = std::fs::remove_file(&path);
 }
 
 /// The positive control: the fixture's own log region is legal, and an
@@ -489,14 +468,12 @@ fn a_sound_log_region_still_opens_and_writes() {
     let mut buf = vec![0u8; 4096];
     r.read_at(BIG_BLOCK_SIZE as u64, &mut buf).unwrap();
     assert_eq!(buf, vec![0xABu8; 4096]);
-    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
 fn an_image_declaring_no_log_at_all_still_opens() {
     let path = big_vhdx_with_log_region("log_absent", 0, 0);
     VhdxReader::open(&path).expect("log_length = 0 means there is no log, which is legal");
-    let _ = std::fs::remove_file(&path);
 }
 
 /// A *dirty* image whose log region names a declared region is refused
@@ -537,7 +514,6 @@ fn a_dirty_log_over_the_metadata_region_is_refused_with_the_region_intact() {
         "the metadata region must be untouched"
     );
     assert_eq!(after, before, "nothing at all should have been written");
-    let _ = std::fs::remove_file(&path);
 }
 
 /// The erase is deferred until the region table has said the log region
@@ -610,7 +586,6 @@ fn a_replayable_chain_at_a_hostile_log_offset_does_not_erase_the_region() {
         &[0xC5u8; 16],
         "the log region was erased before anything said it could be"
     );
-    let _ = std::fs::remove_file(&path);
 }
 
 /// A refused image is an unmodified image, including the descriptor's
@@ -703,7 +678,6 @@ fn a_refused_image_is_not_written_to_by_the_replay_that_precedes_the_refusal() {
         after == before,
         "the refused open modified the image somewhere"
     );
-    let _ = std::fs::remove_file(&path);
 }
 
 /// The same refusal, with the descriptor that erases everything.
@@ -764,7 +738,6 @@ fn a_forged_chain_that_would_erase_the_image_is_refused_before_it_runs() {
         "the file identifier was erased by a replay the reader then refused"
     );
     assert!(after == before, "the refused open modified the image");
-    let _ = std::fs::remove_file(&path);
 }
 
 /// The check after replay is not a duplicate of the one before it.
@@ -837,7 +810,6 @@ fn a_replay_that_moves_a_region_onto_the_log_is_refused_after_it_runs() {
         &hostile_table[..4096],
         "the chain was not applied, so this test did not reach the check it is about"
     );
-    let _ = std::fs::remove_file(&path);
 }
 
 // ---------------------------------------------------------------------------
@@ -884,7 +856,6 @@ fn a_bat_region_too_short_for_the_disk_is_refused_at_open() {
         Ok(_) => panic!("a BAT region half the size the disk needs was accepted"),
         Err(e) => panic!("a short BAT region gave {e:?}"),
     }
-    let _ = std::fs::remove_file(&path);
 }
 
 /// A BAT region far longer than the disk needs is read no further than
@@ -955,7 +926,6 @@ fn a_bat_region_longer_than_the_disk_needs_is_not_read_past_the_disk() {
         "block 0 did not read back"
     );
     drop(r);
-    let _ = std::fs::remove_file(&path);
 }
 
 /// Exactly enough is enough.
@@ -976,7 +946,6 @@ fn a_bat_region_of_exactly_the_required_length_is_accepted() {
     r.read_at(0, &mut buf).unwrap();
     assert_eq!(buf[0], 0, "block 0 did not read back");
     drop(r);
-    let _ = std::fs::remove_file(&path);
 }
 
 /// A length that is not a whole number of entries is refused rather
@@ -1001,7 +970,6 @@ fn a_bat_region_length_that_is_not_whole_entries_is_refused() {
         Ok(_) => panic!("a BAT region length of 8n+4 was accepted"),
         Err(e) => panic!("a ragged BAT region gave {e:?}"),
     }
-    let _ = std::fs::remove_file(&path);
 }
 
 // ---------------------------------------------------------------------------
@@ -1038,7 +1006,6 @@ fn a_differencing_image_is_refused_at_open() {
         ),
         Err(e) => panic!("a differencing image gave {e:?}"),
     }
-    let _ = std::fs::remove_file(&path);
 }
 
 /// The flags word is read rather than assumed: bit 0 is a different
@@ -1058,7 +1025,6 @@ fn the_leave_blocks_allocated_flag_is_not_a_parent() {
     let mut buf = [0u8; 16];
     r.read_at(0, &mut buf).expect("and the image still reads");
     drop(r);
-    let _ = std::fs::remove_file(&path);
 }
 
 // ---------------------------------------------------------------------------
@@ -1125,7 +1091,6 @@ fn an_unknown_required_metadata_item_is_refused_at_open() {
     add_metadata_item(&path, [0xFF; 16], 0x2 | METADATA_IS_REQUIRED);
 
     let result = VhdxReader::open(&path);
-    let _ = std::fs::remove_file(&path);
     match result {
         Err(Error::Unsupported(m)) => assert!(
             m.contains("metadata item"),
@@ -1150,7 +1115,6 @@ fn an_unknown_optional_metadata_item_is_ignored() {
     let mut buf = [0u8; 64];
     r.read_at(0, &mut buf).unwrap();
     drop(r);
-    let _ = std::fs::remove_file(&path);
     assert_eq!(buf[..], data[..64]);
 }
 
@@ -1167,7 +1131,6 @@ fn a_differencing_image_with_its_required_parent_locator_is_refused_as_differenc
     add_metadata_item(&path, PARENT_LOCATOR_ID, METADATA_IS_REQUIRED);
 
     let result = VhdxReader::open(&path);
-    let _ = std::fs::remove_file(&path);
     match result {
         Err(Error::Unsupported(m)) => assert!(
             m.contains("differencing"),
@@ -1215,5 +1178,4 @@ fn a_log_region_that_exhausts_discovery_is_refused_at_open() {
         Ok(_) => panic!("a log discovery could not finish examining opened as clean"),
         Err(e) => panic!("got {e:?}"),
     }
-    let _ = std::fs::remove_file(&path);
 }
