@@ -1299,3 +1299,87 @@ fn a_vhdx_does_not_offer_to_grow_the_disk_inside_it() {
     );
     drop(r);
 }
+
+/// A DIRTY LOG WE CANNOT ASSEMBLE IS REFUSED AT OPEN, NOT READ AS CLEAN (#41).
+///
+/// `open` applies the log before it reads the region table, the metadata and
+/// the BAT, because those live in bytes the log may be part-way through
+/// changing — the module doc at the top of `src/reader.rs` says the order is
+/// not negotiable. That argument was applied to the read-only branch, where a
+/// pending log on an unwritable device is refused, and not to this one: a
+/// chain whose start could not be located came back as an empty `Vec`, which
+/// is what a log with nothing pending returns, so `open` fell through and read
+/// the stale bytes. The caller got a reader serving pre-crash data with no
+/// error and no signal — a file that looks like its last writes were never
+/// made rather than one that is damaged.
+///
+/// The entry here is well formed and committed; only its `tail` is wrong, so
+/// where its sequence began is unknowable. Nothing about the image is
+/// ambiguous except that.
+#[test]
+fn a_dirty_log_whose_chain_cannot_be_assembled_is_refused_at_open() {
+    let path = tmp_path("unassemblable_chain");
+    build_big_vhdx(&path, &pattern_block(13));
+
+    // One well-formed entry at the start of the region, whose `tail` names the
+    // slot immediately AFTER itself -- where there is nothing at all. Encoded
+    // twice because `tail` is an offset and the entry's own length is what
+    // that offset has to clear; the first call is only there to measure it,
+    // and the two differ in nothing else.
+    let write = || vhdx::log::PendingWrite {
+        file_offset: BIG_DATA_BLOCK0_OFFSET + 8192,
+        sector: vec![0xEEu8; 4096],
+    };
+    let measured = vhdx::log::encode_entry(
+        2,
+        0,
+        &[0x77u8; 16],
+        BIG_TOTAL_FILE_SIZE,
+        BIG_TOTAL_FILE_SIZE,
+        &[write()],
+    );
+    let nowhere = u32::try_from(measured.len()).expect("the entry is far short of 4 GiB");
+    let entry = vhdx::log::encode_entry(
+        2,
+        nowhere,
+        &[0x77u8; 16],
+        BIG_TOTAL_FILE_SIZE,
+        BIG_TOTAL_FILE_SIZE,
+        &[write()],
+    );
+    arm_the_log(&path, &entry, &[0x77u8; 16]);
+
+    let before = std::fs::read(&path).unwrap();
+
+    let err = VhdxReader::open(&path)
+        .err()
+        .expect("a log whose chain cannot be assembled opened as though it were clean");
+    match err {
+        vhdx::Error::LogUnassembled(m) => assert!(
+            m.contains("tail"),
+            "the refusal does not name what could not be resolved: {m}"
+        ),
+        other => panic!("refused, but not as LogUnassembled: {other:?}"),
+    }
+
+    // AND NOTHING WAS WRITTEN, which is the claim the error makes and the
+    // reason it is not `LogReplay`. The whole file, byte for byte: the
+    // descriptor did not land, and the log region was not erased, so the
+    // entries are still there for a tool that can make sense of them.
+    assert!(
+        std::fs::read(&path).unwrap() == before,
+        "the refused open changed the image"
+    );
+
+    // The same file is refused read-only too. The condition is a property of
+    // the FILE, not of the opener, so a caller cannot get the stale read back
+    // by asking for it without write permission.
+    let ro = std::sync::Arc::new(fs_core::FileDevice::open(&path).unwrap());
+    assert!(
+        matches!(
+            VhdxReader::open_on_device(ro),
+            Err(vhdx::Error::LogUnassembled(_))
+        ),
+        "a read-only open was served the stale bytes"
+    );
+}

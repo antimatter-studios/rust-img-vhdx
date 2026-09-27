@@ -10,7 +10,7 @@
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
-    // NOT AN ALL-ZERO GUID. `collect_replay_chain_checked` returns an
+    // NOT AN ALL-ZERO GUID. `collect_replay_chain` returns an
     // empty chain immediately when the expected GUID is all zeros --
     // that is how a cleanly-closed image says "nothing to replay" -- so
     // a target passing zeros would exercise one `if` and stop.
@@ -25,6 +25,8 @@ fuzz_target!(|data: &[u8]| {
         guid[0] = 1;
     }
 
+    // ONE ENTRY POINT NOW, where there were two: the `Vec`-returning
+    // wrapper is gone, because an empty `Vec` was how it reported both a
+    // healthy log with nothing pending and a region it had refused (#41).
     let _ = vhdx::log::collect_replay_chain(data, &guid);
-    let _ = vhdx::log::collect_replay_chain_checked(data, &guid);
 });

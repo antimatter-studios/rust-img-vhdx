@@ -418,27 +418,29 @@ fn discover(log_bytes: &[u8], expected_log_guid: &[u8; 16]) -> (Vec<LogEntry>, u
     (found, allowance - budget, exhausted)
 }
 
+/// The active chain in a log region, or a refusal naming why there is no
+/// answer.
 ///
-/// Discovery that runs out of checksum budget returns an empty chain
-/// here, which is indistinguishable from a log with nothing to replay.
-/// [`collect_replay_chain_checked`] tells the two apart, and is what
-/// `open` uses.
-pub fn collect_replay_chain(log_bytes: &[u8], expected_log_guid: &[u8; 16]) -> Vec<LogEntry> {
-    collect_replay_chain_checked(log_bytes, expected_log_guid).unwrap_or_default()
-}
-
-/// As [`collect_replay_chain`], refusing a region discovery could not
-/// finish examining.
+/// `Ok(empty)` MEANS ONE THING ONLY: the log has nothing to replay. Every
+/// way of failing to work out the chain is an `Err`, and there are two:
 ///
-/// Discovery bounds its checksum work (see `parse_log_entry`), and a
-/// region that exhausts the bound has slots nobody looked at. A valid,
-/// committed entry among them was silently absent from the chain, and
-/// `open` then replayed what was found, zeroed the log and marked the
-/// image clean -- measured on a 64 KiB region: one valid entry recovered
-/// alone, and not at all behind 13 bad-checksum slots declaring 385 KiB
-/// between them (#73). Such a region is refused as corrupt instead: the
-/// chain it would give cannot be shown to be the whole chain.
-pub fn collect_replay_chain_checked(
+/// - **Discovery could not finish examining the region.** It bounds its
+///   checksum work (see `parse_log_entry`), and a region that exhausts the
+///   bound has slots nobody looked at, so a valid committed entry among them
+///   would be silently absent from the chain — measured on a 64 KiB region:
+///   one valid entry recovered alone, and not at all behind 13 bad-checksum
+///   slots declaring 385 KiB between them (#73). `Error::Corrupt`: the chain
+///   it would give cannot be shown to be the whole chain.
+/// - **The chain could not be assembled from what was found.**
+///   `Error::LogUnassembled`, at pass 3 of the chain selection (#41).
+///
+/// THERE WAS A SECOND FUNCTION HERE, and it is gone rather than deprecated.
+/// `collect_replay_chain` returned `Vec<LogEntry>` with an
+/// `unwrap_or_default()` inside it, so both refusals above arrived as the
+/// same empty vector a healthy log returns — the exact confusion this
+/// signature exists to remove, reachable from a `pub` function. One function,
+/// one name, and a caller has to look at the `Result`.
+pub fn collect_replay_chain(
     log_bytes: &[u8],
     expected_log_guid: &[u8; 16],
 ) -> crate::error::Result<Vec<LogEntry>> {
@@ -454,13 +456,17 @@ pub fn collect_replay_chain_checked(
              entries in it may not have been examined",
         ));
     }
-    Ok(select_chain(log_bytes, found))
+    select_chain(log_bytes, found)
 }
 
 /// Passes 2 onward: the active chain among what discovery found.
-fn select_chain(log_bytes: &[u8], found: Vec<LogEntry>) -> Vec<LogEntry> {
+///
+/// `Ok(empty)` means discovery found nothing, which is a log with nothing to
+/// do. A chain that could not be assembled is an `Err` -- see
+/// [`crate::error::Error::LogUnassembled`] and the note at pass 3.
+fn select_chain(log_bytes: &[u8], found: Vec<LogEntry>) -> crate::error::Result<Vec<LogEntry>> {
     if found.is_empty() {
-        return found;
+        return Ok(found);
     }
 
     // Pass 2 — the head. The active chain ends at the highest sequence
@@ -483,14 +489,27 @@ fn select_chain(log_bytes: &[u8], found: Vec<LogEntry>) -> Vec<LogEntry> {
     // chain that does not begin at offset 0, from being mistaken for
     // part of this one.
     //
-    // If it resolves to nothing we found, we do not guess. The caller
-    // erases the log region and marks the image clean the moment a
-    // chain comes back, so falling back to whatever entry sits lowest
-    // in the region would let a stale chain be applied and destroy the
-    // live one on its way out. Replaying nothing leaves the log intact
-    // for a reader that can make sense of it.
+    // If it resolves to nothing we found, we do not guess -- AND WE SAY SO.
+    //
+    // Not guessing is right: the caller erases the log region and marks the
+    // image clean the moment a chain comes back, so falling back to whatever
+    // entry sits lowest in the region would let a stale chain be applied and
+    // destroy the live one on its way out.
+    //
+    // Reporting it is the part that was missing. This used to return an empty
+    // chain, which is what a log with nothing pending returns, so `open` fell
+    // through and read the region table, the metadata and the BAT out of the
+    // very bytes the log was going to fix -- handing back a reader that serves
+    // pre-crash data with no error and no signal, and looks like a file whose
+    // last writes were never made rather than one that is damaged (#41).
+    //
+    // Nothing has been written at this point, which is what the error says and
+    // why it is not `LogReplay`.
     let Some(first) = entry_starting_at(&found, head.header.tail as usize) else {
-        return Vec::new();
+        return Err(crate::error::Error::LogUnassembled(
+            "the head entry's tail names no entry in the log region, so where \
+             its sequence began is unknowable",
+        ));
     };
     let start = first.log_offset_in_region as usize;
 
@@ -525,7 +544,7 @@ fn select_chain(log_bytes: &[u8], found: Vec<LogEntry>) -> Vec<LogEntry> {
             None => break,
         }
     }
-    chain
+    Ok(chain)
 }
 
 /// Apply the descriptors of a log chain to the underlying device. Each
@@ -836,7 +855,7 @@ mod tests {
         let mut log_bytes = vec![0u8; 1024 * 1024];
         log_bytes[..entry.len()].copy_from_slice(&entry);
 
-        let chain = collect_replay_chain(&log_bytes, &log_guid);
+        let chain = collect_replay_chain(&log_bytes, &log_guid).expect("the region is examinable");
         assert_eq!(chain.len(), 1);
         match &chain[0].descriptors[0] {
             Descriptor::Data {
@@ -854,7 +873,8 @@ mod tests {
     #[test]
     fn empty_log_guid_skips_replay() {
         let log_bytes = vec![0u8; 1024 * 1024];
-        let chain = collect_replay_chain(&log_bytes, &[0u8; 16]);
+        let chain = collect_replay_chain(&log_bytes, &[0u8; 16])
+            .expect("an all-zero GUID is not a refusal");
         assert!(chain.is_empty());
     }
 
@@ -1047,7 +1067,7 @@ mod tests {
     #[test]
     fn contiguous_multi_entry_chain_replays_in_full() {
         let region = contiguous_chain(4);
-        let chain = collect_replay_chain(&region, &LIVE_GUID);
+        let chain = collect_replay_chain(&region, &LIVE_GUID).expect("the region is examinable");
         assert_eq!(sequences(&chain), vec![1, 2, 3, 4]);
         assert_eq!(
             replayed_offsets(&chain),
@@ -1064,7 +1084,7 @@ mod tests {
         // partway through writing an entry leaves behind.
         region[2 * ONE_WRITE_ENTRY_LEN + LOG_SECTOR_SIZE + 100] ^= 0xFF;
 
-        let chain = collect_replay_chain(&region, &LIVE_GUID);
+        let chain = collect_replay_chain(&region, &LIVE_GUID).expect("the region is examinable");
         assert_eq!(
             sequences(&chain),
             vec![1, 2],
@@ -1082,7 +1102,11 @@ mod tests {
         region[2 * ONE_WRITE_ENTRY_LEN + LOG_SECTOR_SIZE + 100] ^= 0xFF;
 
         let dev = MemDevice::filled(8 * 1024 * 1024, 0xCC);
-        apply_chain(&dev, &collect_replay_chain(&region, &LIVE_GUID)).unwrap();
+        apply_chain(
+            &dev,
+            &collect_replay_chain(&region, &LIVE_GUID).expect("the region is examinable"),
+        )
+        .unwrap();
 
         assert_eq!(MemDevice::byte_at(&dev, target_of(1)), 0x11);
         assert_eq!(MemDevice::byte_at(&dev, target_of(2)), 0x12);
@@ -1107,7 +1131,7 @@ mod tests {
             2 * ONE_WRITE_ENTRY_LEN,
             &one_write_entry(9, 0, &LIVE_GUID),
         );
-        let chain = collect_replay_chain(&region, &LIVE_GUID);
+        let chain = collect_replay_chain(&region, &LIVE_GUID).expect("the region is examinable");
         assert_eq!(sequences(&chain), vec![1, 2]);
     }
 
@@ -1122,7 +1146,7 @@ mod tests {
             2 * ONE_WRITE_ENTRY_LEN,
             &one_write_entry(3, 0, &FOREIGN_GUID),
         );
-        let chain = collect_replay_chain(&region, &LIVE_GUID);
+        let chain = collect_replay_chain(&region, &LIVE_GUID).expect("the region is examinable");
         assert_eq!(sequences(&chain), vec![1, 2]);
     }
 
@@ -1149,7 +1173,7 @@ mod tests {
             &one_write_entry(2, 4 * ONE_WRITE_ENTRY_LEN as u32, &LIVE_GUID),
         );
 
-        let chain = collect_replay_chain(&region, &LIVE_GUID);
+        let chain = collect_replay_chain(&region, &LIVE_GUID).expect("the region is examinable");
         assert_eq!(sequences(&chain), vec![5, 6]);
         let applied = replayed_offsets(&chain);
         assert!(!applied.contains(&target_of(1)));
@@ -1173,7 +1197,7 @@ mod tests {
             &one_write_entry(2, start as u32, &LIVE_GUID),
         );
 
-        let chain = collect_replay_chain(&region, &LIVE_GUID);
+        let chain = collect_replay_chain(&region, &LIVE_GUID).expect("the region is examinable");
         assert_eq!(sequences(&chain), vec![1, 2]);
         assert_eq!(chain[0].log_offset_in_region, start as u64);
     }
@@ -1202,7 +1226,7 @@ mod tests {
             &one_write_entry(3, start as u32, &LIVE_GUID),
         );
 
-        let chain = collect_replay_chain(&region, &LIVE_GUID);
+        let chain = collect_replay_chain(&region, &LIVE_GUID).expect("the region is examinable");
         assert_eq!(sequences(&chain), vec![1, 2, 3]);
     }
 
@@ -1244,7 +1268,7 @@ mod tests {
             &one_write_entry(3, start as u32, &LIVE_GUID),
         );
 
-        let chain = collect_replay_chain(&region, &LIVE_GUID);
+        let chain = collect_replay_chain(&region, &LIVE_GUID).expect("the region is examinable");
         assert_eq!(sequences(&chain), vec![1, 2, 3]);
         assert_eq!(chain[1].log_offset_in_region, straddling as u64);
         match &chain[1].descriptors[..] {
@@ -1278,17 +1302,22 @@ mod tests {
             &one_write_entry(2, start as u32, &LIVE_GUID),
         );
         region[100] ^= 0xFF;
-        let chain = collect_replay_chain(&region, &LIVE_GUID);
+        let chain = collect_replay_chain(&region, &LIVE_GUID).expect("the region is examinable");
         assert_eq!(sequences(&chain), vec![1]);
     }
 
     #[test]
-    fn an_unlocatable_chain_start_replays_nothing() {
+    fn an_unlocatable_chain_start_is_refused_rather_than_read_as_nothing_to_do() {
         // The head says its sequence began at the second slot, and that
         // slot is torn. Where this chain starts is now unknowable, and
         // the entry still sitting at offset 0 belongs to a run the head
         // has disowned. Replaying it would apply a stale write and then
         // let the caller erase the log that still holds the real chain.
+        //
+        // NOT REPLAYING IT WAS ALWAYS RIGHT; RETURNING AN EMPTY CHAIN FOR IT
+        // WAS NOT. An empty chain is what a log with nothing pending returns,
+        // so `open` fell through and read the region table, the metadata and
+        // the BAT out of the bytes this log was going to fix (#41).
         let mut region = contiguous_chain(4);
         splice(
             &mut region,
@@ -1297,7 +1326,18 @@ mod tests {
         );
         region[ONE_WRITE_ENTRY_LEN + LOG_SECTOR_SIZE + 7] ^= 0xFF;
 
-        assert!(collect_replay_chain(&region, &LIVE_GUID).is_empty());
+        match collect_replay_chain(&region, &LIVE_GUID) {
+            Err(crate::error::Error::LogUnassembled(m)) => assert!(
+                m.contains("tail"),
+                "the refusal does not name what could not be resolved: {m}"
+            ),
+            Ok(chain) => panic!(
+                "a chain whose start cannot be located came back as {} entries; \
+                 an empty one reads as a log with nothing to do",
+                chain.len()
+            ),
+            Err(e) => panic!("refused, but not as LogUnassembled: {e:?}"),
+        }
     }
 
     /// Hand-built entry carrying a single "zero" descriptor. The
@@ -1330,7 +1370,7 @@ mod tests {
             &zero_descriptor_entry(1, &LIVE_GUID, 2 * 1024 * 1024, 8192),
         );
 
-        let chain = collect_replay_chain(&region, &LIVE_GUID);
+        let chain = collect_replay_chain(&region, &LIVE_GUID).expect("the region is examinable");
         assert_eq!(chain.len(), 1);
         match &chain[0].descriptors[0] {
             Descriptor::Zero {
@@ -1478,7 +1518,7 @@ mod tests {
         let mut region = vec![0u8; REGION];
         splice(&mut region, 0xE000, &one_write_entry(1, 0xE000, &LIVE_GUID));
 
-        let control = collect_replay_chain_checked(&region, &LIVE_GUID)
+        let control = collect_replay_chain(&region, &LIVE_GUID)
             .expect("a region with nothing but the entry is examined in full");
         assert_eq!(
             sequences(&control),
@@ -1494,7 +1534,7 @@ mod tests {
             region[pos + 8..pos + 12].copy_from_slice(&len.to_le_bytes());
             region[pos + 32..pos + 48].copy_from_slice(&LIVE_GUID);
         }
-        match collect_replay_chain_checked(&region, &LIVE_GUID) {
+        match collect_replay_chain(&region, &LIVE_GUID) {
             Err(crate::error::Error::Corrupt(m)) => assert!(
                 m.contains("may not have been examined"),
                 "refused, but not for the budget: {m}"
@@ -1530,7 +1570,7 @@ mod tests {
             0,
             &zero_descriptor_entry(1, &LIVE_GUID, 2 * 1024 * 1024, u64::MAX),
         );
-        let chain = collect_replay_chain(&region, &LIVE_GUID);
+        let chain = collect_replay_chain(&region, &LIVE_GUID).expect("the region is examinable");
         assert_eq!(chain.len(), 1, "the entry itself is well formed");
 
         let dev = MemDevice::filled(4 * 1024 * 1024, 0xCC);
@@ -1553,7 +1593,7 @@ mod tests {
             0,
             &zero_descriptor_entry(1, &LIVE_GUID, 1 << 40, 4096),
         );
-        let chain = collect_replay_chain(&region, &LIVE_GUID);
+        let chain = collect_replay_chain(&region, &LIVE_GUID).expect("the region is examinable");
         let dev = MemDevice::filled(4 * 1024 * 1024, 0xCC);
         assert!(apply_chain(&dev, &chain).is_err());
     }
@@ -1576,7 +1616,7 @@ mod tests {
         );
         let mut region = vec![0u8; TEST_REGION_LEN];
         splice(&mut region, 0, &entry);
-        let chain = collect_replay_chain(&region, &LIVE_GUID);
+        let chain = collect_replay_chain(&region, &LIVE_GUID).expect("the region is examinable");
         assert_eq!(chain.len(), 1, "the entry itself is well formed");
 
         let dev = MemDevice::filled(4 * 1024 * 1024, 0xCC);
@@ -1621,7 +1661,7 @@ mod tests {
                 }],
             ),
         );
-        let chain = collect_replay_chain(&region, &LIVE_GUID);
+        let chain = collect_replay_chain(&region, &LIVE_GUID).expect("the region is examinable");
         assert_eq!(chain.len(), 1, "the entry itself is well formed");
 
         let dev = GrowableMem::filled(SIZE as usize, 0xCC);
@@ -1677,7 +1717,7 @@ mod tests {
                 }],
             ),
         );
-        let chain = collect_replay_chain(&region, &LIVE_GUID);
+        let chain = collect_replay_chain(&region, &LIVE_GUID).expect("the region is examinable");
 
         let dev = MemDevice::filled(SIZE as usize, 0xCC);
         let err = apply_chain(&dev, &chain)
@@ -1710,7 +1750,7 @@ mod tests {
             LOG_SECTOR_SIZE,
             &zero_descriptor_entry(2, &LIVE_GUID, 1 << 40, 4096),
         );
-        let chain = collect_replay_chain(&region, &LIVE_GUID);
+        let chain = collect_replay_chain(&region, &LIVE_GUID).expect("the region is examinable");
         assert_eq!(chain.len(), 2);
 
         let dev = MemDevice::filled(4 * 1024 * 1024, 0xCC);
