@@ -10,7 +10,7 @@
 # reporting under the github-actions app changes what is required without
 # anyone deciding to. Pinning it costs nothing and makes the intent reviewable.
 #
-# WHY THIS FILE EXISTS. The audit in antimatter-studios/diskjockey#197 went
+# WHY THIS FILE EXISTS. A family-wide CI audit went
 # looking for required-check lists that had drifted away from the checks CI
 # actually produces. This repository's had not: the six names it then declared
 # — `fmt`, `qemu-validation`, `test / ubuntu-latest`, `test / macos-latest`,
