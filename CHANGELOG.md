@@ -9,6 +9,23 @@ never does.
 
 ### Changed
 
+- **`a_released_section_that_breaks_api_bumped_the_minor` matches the marker
+  case-insensitively.** It was `body.contains("BREAKING")`, matched against the
+  uppercase spelling this repository happens to use. The sibling
+  `rust-img-vhd` writes it lowercase — ``**`Error::ReadOnly` carries its
+  cause** (breaking: match `ReadOnly(_)`)`` — and an `Error` variant that
+  gained a payload is as breaking as anything here, so the guard would have
+  passed that changelog and let the release ship as a patch.
+
+  A check that misses the very case it was written for reports protection it is
+  not providing, which is the defect this whole file exists to catch, found
+  inside the file itself. `a_break_is_recognised_however_it_is_spelled` covers
+  the spellings the family actually uses and the near-misses it must not match.
+
+  Deliberately loose — the word, in any case, anywhere in the section. A false
+  positive costs a minor bump nobody needed; a false negative costs a consumer
+  a build that stopped compiling on a patch.
+
 - **`fuzz/Cargo.toml` follows this crate's `am-fs-core` pin, and a test says
   so.** *(rust-img-qcow2#118)* The fuzz crate is a separate package with its own
   manifest and lockfile, so nothing about bumping the parent's dependency
