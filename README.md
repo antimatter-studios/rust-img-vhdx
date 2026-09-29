@@ -47,6 +47,26 @@ chunked BAT — but the read path is approachable when broken into the
 file identifier → header → region → metadata → BAT pipeline, and the
 write path layers on top once the log is understood.
 
+## Verifying a release
+
+From the next release onward, every version published to crates.io is
+also attached to the GitHub release for its tag, with a build-provenance
+attestation signed by this repository's release workflow. It proves the
+crate was built by `.github/workflows/release.yml` from a commit in this
+repository, not uploaded from someone's machine. To check the crates.io
+download of version `X.Y.Z`:
+
+```sh
+curl -sSfLo am-img-vhdx-X.Y.Z.crate https://static.crates.io/crates/am-img-vhdx/am-img-vhdx-X.Y.Z.crate
+gh attestation verify am-img-vhdx-X.Y.Z.crate \
+  --repo antimatter-studios/rust-img-vhdx \
+  --signer-workflow antimatter-studios/rust-img-vhdx/.github/workflows/release.yml
+```
+
+The workflow refuses to attest a `.crate` whose sha256 differs from the
+checksum crates.io records for that version, so the file on the release
+page and the crates.io download are the same bytes.
+
 ## License
 
 MIT.
