@@ -27,13 +27,13 @@ use vhdx::header::{Header, HEADER1_OFFSET, HEADER2_OFFSET, HEADER_SIZE};
 use vhdx::VhdxReader;
 
 use super::overlay::Overlay;
-use crate::common::{CliError, Json, Outcome, Tool};
+use fs_core::cli::{CliError, Json, Outcome, Tool};
 
 pub const TOOL: Tool = Tool {
     name: "img.vhdx",
     verb: "img",
     section: 1,
-    usage_exit: crate::common::output::EXIT_USAGE,
+    usage_exit: fs_core::cli::output::EXIT_USAGE,
     about: "Report, read and write a VHDX disk image without a hypervisor",
     command,
     run,
@@ -74,7 +74,7 @@ fn command() -> Cmd {
                 .value_parser(value_parser!(OsString))
                 .required(true),
         )
-        .args(crate::common::format_args().map(|a| a.global(true)))
+        .args(fs_core::cli::format_args().map(|a| a.global(true)))
         .subcommand_required(true)
         .subcommand(key_command(
             "info",
@@ -583,7 +583,7 @@ mod tests {
         let p = Path::new("x.vhdx");
         assert_eq!(
             vhdx_error(p, vhdx::Error::Unsupported("a differencing VHDX")).code,
-            crate::common::output::EXIT_UNSUPPORTED
+            fs_core::cli::output::EXIT_UNSUPPORTED
         );
         assert!(
             vhdx_error(p, vhdx::Error::Unsupported("a differencing VHDX"))
@@ -592,11 +592,11 @@ mod tests {
         );
         assert_eq!(
             vhdx_error(p, vhdx::Error::NotVhdx).code,
-            crate::common::output::EXIT_FAILED
+            fs_core::cli::output::EXIT_FAILED
         );
         assert_eq!(
             vhdx_error(p, vhdx::Error::Corrupt("BAT")).code,
-            crate::common::output::EXIT_FAILED
+            fs_core::cli::output::EXIT_FAILED
         );
     }
 }
