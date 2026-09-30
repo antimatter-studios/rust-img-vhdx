@@ -107,6 +107,9 @@ pub struct VhdxReader {
     virtual_size: u64,
     block_size: u32,
     sector_size: u32,
+    /// The PhysicalSectorSize metadata item, when the file carries one.
+    /// Reported, never enforced: nothing this reader does depends on it.
+    physical_sector_size: Option<u32>,
     chunk_ratio: u64,
 
     /// Where the BAT region lives on disk.
@@ -531,6 +534,9 @@ impl VhdxReader {
             .item_data(&item_ids::LOGICAL_SECTOR_SIZE)
             .ok_or(Error::BadMetadata("LogicalSectorSize item missing"))?;
         let sector_size = read_sector_size(sector_size_bytes)?;
+        let physical_sector_size = metadata
+            .item_data(&item_ids::PHYSICAL_SECTOR_SIZE)
+            .and_then(|bytes| read_sector_size(bytes).ok());
 
         if !file_params.block_size.is_power_of_two() {
             return Err(Error::Corrupt("block_size not a power of two"));
@@ -647,6 +653,7 @@ impl VhdxReader {
             virtual_size,
             block_size: file_params.block_size,
             sector_size,
+            physical_sector_size,
             chunk_ratio,
             bat_region_off: bat_region.file_offset,
             bat: Mutex::new(bat),
@@ -664,6 +671,14 @@ impl VhdxReader {
 
     pub fn sector_size(&self) -> u32 {
         self.sector_size
+    }
+
+    /// The physical sector size the metadata region records, or `None`
+    /// when the file carries no PhysicalSectorSize item (or one too short
+    /// to hold a size). Informational: reads and writes go by
+    /// [`sector_size`](Self::sector_size), the logical one.
+    pub fn physical_sector_size(&self) -> Option<u32> {
+        self.physical_sector_size
     }
 
     /// Whether this image has a parent — always `false`.
