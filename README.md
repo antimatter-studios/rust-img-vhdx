@@ -39,6 +39,33 @@ linked.
       writes touching one are refused as unsupported.
 - [ ] Differencing chains (parent locator metadata + chain walk).
 
+## Command line
+
+`img.vhdx <image> <verb>` reports and reads a VHDX image without a
+hypervisor. It is one multi-call binary, `rust-img-vhdx`, with `img.vhdx` a
+link to it; `rust-img-vhdx img ...` is the same program under the one name
+nothing else on `PATH` can shadow, and `rust-img-vhdx doctor` says whether
+the `img.vhdx` on `PATH` is this one. Build it with the `cli` feature (the
+library alone gains no dependency from it):
+
+```sh
+chore cli:install                         # or: cargo build --release --features cli
+img.vhdx disk.vhdx info                   # JSON; --text for people
+img.vhdx disk.vhdx read -o disk.raw       # the whole virtual disk, as a raw image
+img.vhdx disk.vhdx read --offset 0 --length 512 | xxd
+```
+
+Metadata is JSON by default, led by the keys every `img.<fmt>` tool shares
+(`format`, `virtual_size`, `block_size`, `backing`, `dirty`) with the
+format's own under `vhdx`. A failure is `{"error": "...", "code": N}` on
+stderr, `N` being the exit status: 1 failed, 2 wrong command line, 3 not
+implemented. `info` and `read` never write the image: a log left to replay
+is replayed in memory, and `dirty` says there was one. `create`, `resize`
+and `set` exist and answer `not implemented`: the library has no creator
+and no resize.
+
+`chore test:cli` tests the tool as installed, against `qemu-img`.
+
 ## Spec
 
 Microsoft's *VHDX Format Specification* (MS-VHDX). The format is more

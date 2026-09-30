@@ -298,3 +298,45 @@ pub fn pattern_block(seed: u8) -> Box<[u8; BIG_BLOCK_SIZE as usize]> {
     }
     data
 }
+
+/// Plant a replayable single-entry log and the header that names it,
+/// in slot 2, at sequence 5.
+pub fn inject_dirty_log(path: &std::path::Path, log_guid: [u8; 16]) {
+    let sector = vec![0xEEu8; 4096];
+    let entry = vhdx::log::encode_entry(
+        2,
+        0,
+        &log_guid,
+        BIG_TOTAL_FILE_SIZE,
+        BIG_TOTAL_FILE_SIZE,
+        &[vhdx::log::PendingWrite {
+            file_offset: BIG_DATA_BLOCK0_OFFSET + 8192,
+            sector,
+        }],
+    );
+
+    let mut f = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .unwrap();
+    f.seek(SeekFrom::Start(BIG_LOG_OFFSET)).unwrap();
+    f.write_all(&entry).unwrap();
+
+    let mut hdr = vec![0u8; HEADER_SIZE];
+    hdr[0..4].copy_from_slice(b"head");
+    hdr[8..16].copy_from_slice(&5u64.to_le_bytes());
+    hdr[48..64].copy_from_slice(&log_guid);
+    hdr[66..68].copy_from_slice(&1u16.to_le_bytes());
+    hdr[68..72].copy_from_slice(&BIG_LOG_LENGTH.to_le_bytes());
+    hdr[72..80].copy_from_slice(&BIG_LOG_OFFSET.to_le_bytes());
+    let crc = {
+        let mut tmp = hdr.clone();
+        tmp[4..8].fill(0);
+        crc32c::crc32c(&tmp)
+    };
+    hdr[4..8].copy_from_slice(&crc.to_le_bytes());
+    f.seek(SeekFrom::Start(HEADER2_OFFSET)).unwrap();
+    f.write_all(&hdr).unwrap();
+    f.flush().unwrap();
+}
