@@ -111,3 +111,11 @@ panic = "unwind"
 name = "cli_read"
 path = "tests/cli_read.rs"
 required-features = ["cli"]
+
+# `img.vhdx write`'s refusals against the built binary, and a write into
+# the crate's replayable-log fixture. Needs the `rust-img-vhdx` target, as
+# cli_read does.
+[[test]]
+name = "cli_write"
+path = "tests/cli_write.rs"
+required-features = ["cli"]

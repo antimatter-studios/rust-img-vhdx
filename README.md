@@ -41,7 +41,7 @@ linked.
 
 ## Command line
 
-`img.vhdx <image> <verb>` reports and reads a VHDX image without a
+`img.vhdx <image> <verb>` reports, reads and writes a VHDX image without a
 hypervisor. It is one multi-call binary, `rust-img-vhdx`, with `img.vhdx` a
 link to it; `rust-img-vhdx img ...` is the same program under the one name
 nothing else on `PATH` can shadow, and `rust-img-vhdx doctor` says whether
@@ -53,6 +53,7 @@ chore cli:install                         # or: cargo build --release --features
 img.vhdx disk.vhdx info                   # JSON; --text for people
 img.vhdx disk.vhdx read -o disk.raw       # the whole virtual disk, as a raw image
 img.vhdx disk.vhdx read --offset 0 --length 512 | xxd
+img.vhdx disk.vhdx write --offset 0 < mbr.bin
 ```
 
 Metadata is JSON by default, led by the keys every `img.<fmt>` tool shares
@@ -60,7 +61,9 @@ Metadata is JSON by default, led by the keys every `img.<fmt>` tool shares
 format's own under `vhdx`. A failure is `{"error": "...", "code": N}` on
 stderr, `N` being the exit status: 1 failed, 2 wrong command line, 3 not
 implemented. `info` and `read` never write the image: a log left to replay
-is replayed in memory, and `dirty` says there was one. `create`, `resize`
+is replayed in memory, and `dirty` says there was one. `write` allocates
+blocks as it needs them, journalled through the image's log, and replays a
+log an earlier writer left before it writes. `create`, `resize`
 and `set` exist and answer `not implemented`: the library has no creator
 and no resize.
 

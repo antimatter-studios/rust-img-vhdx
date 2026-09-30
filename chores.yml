@@ -286,13 +286,15 @@ tasks:
     #
     # BUDGET AND FLOOR, measured 2026-09-29 on the Mac: 20 lines, 699
     # bytes, 188 checks executed when the tier was added with the read
-    # verbs. (Each file prints `test result: ok. N passed`, which
-    # test-floor.sh sums as it does cargo's.) The budget leaves room for a
+    # verbs; 23 lines, 781 bytes and 308 checks on 2026-09-30 when `write`
+    # joined it, and the floor rose with that count. (Each file prints
+    # `test result: ok. N passed`, which test-floor.sh sums as it does
+    # cargo's.) The budget leaves room for a
     # runner's longer paths in the doctor and PATH lines; the floor is about
     # 95% of the count. The `cli` job in ci.yml carries the same numbers.
     cmds:
       - 'bash scripts/tier.sh "test (cli)" cli 35 1300 -- bash scripts/test-cli.sh'
-      - 'bash scripts/test-floor.sh cli 178'
+      - 'bash scripts/test-floor.sh cli 292'
 
   clean:
     desc: Remove this crate's cargo output

@@ -15,9 +15,11 @@ never does.
   reports the image as JSON (`--text` for people), and `read [--offset N]
   [--length N] [-o FILE]` streams the guest's raw bytes, the whole virtual
   disk when no range is given. Neither writes the image: a log left to
-  replay is replayed in memory and reported as `dirty`. `create` (no creator
-  in the library), `resize` and `set` answer `not implemented` (exit 3), and
-  `write` until its verb lands. `rust-img-vhdx doctor` checks that the
+  replay is replayed in memory and reported as `dirty`. `write --offset N`
+  writes stdin into the guest, refusing input that would run past the end
+  of the virtual disk, and the image as its own input, before writing any of
+  it. `create` (no creator in the library), `resize` and `set` answer `not
+  implemented` (exit 3). `rust-img-vhdx doctor` checks that the
   `img.vhdx` on `PATH` is this one. `chore test:cli` tests the installed tool
   against `qemu-img`, and CI runs it on every pull request.
 
