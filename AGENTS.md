@@ -257,7 +257,7 @@ thing to check.
 
 ### One core pin now, where there used to be two
 
-`ci.yml` clones `../rust-fs-core` once, at **v0.2.13**, and exports
+`ci.yml` clones `../rust-fs-core` once, at **v0.2.14**, and exports
 `FS_CORE_ROOT` at it. That is both the crate this one compiles against and the
 checkout the wrapper comes from.
 

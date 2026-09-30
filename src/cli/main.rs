@@ -1,20 +1,16 @@
 //! `rust-img-vhdx`: the command-line tool for VHDX images, one multi-call
 //! binary.
 //!
-//! Installed as `rust-img-vhdx` and linked as `img.vhdx`; see `common` for
-//! the dispatch and the output contract every tool shares, and `vhdx` for
-//! the tool itself.
+//! Installed as `rust-img-vhdx` and linked as `img.vhdx`. The dispatch and the
+//! output contract every tool shares are `fs_core::cli` (am-fs-core's `cli`
+//! feature); `vhdx` is the tool itself.
 
-// The shared plumbing is a library in waiting (see its module docs): its
-// API is whole, and a piece this repository does not call yet is not dead,
-// it is the part another format's tools will.
-#[allow(dead_code)]
-mod common;
 mod vhdx;
 
+use fs_core::cli;
 use std::process::ExitCode;
 
-static FAMILY: common::Family = common::Family {
+static FAMILY: cli::Family = cli::Family {
     repo: "rust-img-vhdx",
     crate_name: env!("CARGO_PKG_NAME"),
     version: env!("CARGO_PKG_VERSION"),
@@ -27,5 +23,5 @@ static FAMILY: common::Family = common::Family {
 };
 
 fn main() -> ExitCode {
-    common::main(&FAMILY)
+    cli::main(&FAMILY)
 }

@@ -43,7 +43,7 @@ jobs:
         # spelling the scripts can use.
         shell: bash
         run: |
-          git clone --depth 1 --branch v0.2.13 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
+          git clone --depth 1 --branch v0.2.14 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
           echo "FS_CORE_ROOT=$(cd ../rust-fs-core && pwd)" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -137,7 +137,7 @@ jobs:
         # the `test` job above for why it used to be two.
         shell: bash
         run: |
-          git clone --depth 1 --branch v0.2.13 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
+          git clone --depth 1 --branch v0.2.14 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
           echo "FS_CORE_ROOT=$(cd ../rust-fs-core && pwd)" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -179,7 +179,7 @@ jobs:
       # the docs step below was added. Same ref as every other job.
       - name: clone am-fs-core sibling
         shell: bash
-        run: git clone --depth 1 --branch v0.2.13 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
+        run: git clone --depth 1 --branch v0.2.14 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.95.0
@@ -228,7 +228,7 @@ jobs:
         # the `test` job above for why it used to be two.
         shell: bash
         run: |
-          git clone --depth 1 --branch v0.2.13 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
+          git clone --depth 1 --branch v0.2.14 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
           echo "FS_CORE_ROOT=$(cd ../rust-fs-core && pwd)" >> "$GITHUB_ENV"
       - name: install qemu-utils
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-utils
@@ -307,7 +307,7 @@ jobs:
         # the `test` job above for why it used to be two.
         shell: bash
         run: |
-          git clone --depth 1 --branch v0.2.13 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
+          git clone --depth 1 --branch v0.2.14 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
           echo "FS_CORE_ROOT=$(cd ../rust-fs-core && pwd)" >> "$GITHUB_ENV"
       - name: install qemu-utils, jq and man
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-utils jq man-db
