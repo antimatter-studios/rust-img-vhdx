@@ -309,8 +309,8 @@ jobs:
         run: |
           git clone --depth 1 --branch v0.2.13 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
           echo "FS_CORE_ROOT=$(cd ../rust-fs-core && pwd)" >> "$GITHUB_ENV"
-      - name: install qemu-utils and jq
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-utils jq
+      - name: install qemu-utils, jq and man
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-utils jq man-db
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.95.0
@@ -322,13 +322,14 @@ jobs:
       - name: the cli tier (chore test:cli)
         # Measured on 2026-09-29 on the Mac: 20 lines, 699 bytes, 188
         # checks executed; 23 lines, 781 bytes, 308 checks on 2026-09-30
-        # with `write`. The budget leaves room for the runner's longer
+        # with `write`; 26 lines, 860 bytes, 336 checks with the man pages
+        # and completions. The budget leaves room for the runner's longer
         # paths, which appear in the doctor and PATH lines; the floor is
         # about 95% of the count, and moves up with the suite.
         shell: bash
         run: |
           bash scripts/tier.sh "test (cli)" cli 35 1300 -- bash scripts/test-cli.sh
-          bash scripts/test-floor.sh cli 292
+          bash scripts/test-floor.sh cli 319
       - name: keep the tier log
         if: always()
         uses: actions/upload-artifact@v4
