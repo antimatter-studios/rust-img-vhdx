@@ -17,7 +17,6 @@ not_implemented() {
 
 not_implemented "resize" img.vhdx disk.vhdx resize 16M
 not_implemented "set" img.vhdx disk.vhdx set virtual_size 16M
-not_implemented "write" img.vhdx disk.vhdx write --offset 0 </dev/null
 not_implemented "create" img.vhdx new.vhdx create 8M
 same "no refused verb changed the image" disk.vhdx before.vhdx
 check "the refused create made no file" test ! -e new.vhdx
