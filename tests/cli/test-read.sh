@@ -9,9 +9,10 @@ source "$(dirname "$0")/images.sh"
 cd "$SANDBOX" || exit 1
 make_images
 
-# slice FILE OFFSET LENGTH: those bytes of FILE, on stdout.
+# slice FILE OFFSET LENGTH: those bytes of FILE, on stdout. GNU tail
+# reports the pipe head closes once it has enough; that is not an error.
 slice() {
-    tail -c +$(($2 + 1)) "$1" | head -c "$3"
+    tail -c +$(($2 + 1)) "$1" 2>/dev/null | head -c "$3"
 }
 
 for img in $IMAGES; do
