@@ -221,6 +221,10 @@ jobs:
         # The standalone-crate rule (AGENTS.md, "Project rules"), held by a
         # scan of every tracked file rather than by memory (#131).
         run: bash tests/scripts/test-no-consumer-names.sh
+      - name: a job holding a write token runs only pinned actions
+        # Named here because nothing runs tests/scripts by glob in this
+        # workflow: a guard only in that directory would never run.
+        run: bash tests/scripts/test-write-jobs-pinned.sh
 
   # Cross-validates our reader/writer against `qemu-img`. qemu-img is
   # invoked as a subprocess only — never linked, never bundled. The
