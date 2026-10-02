@@ -50,7 +50,7 @@ jobs:
         # spelling the scripts can use.
         shell: bash
         run: |
-          git clone --depth 1 --branch v0.2.14 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
+          git clone --depth 1 --branch v0.2.16 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
           echo "FS_CORE_ROOT=$(cd ../rust-fs-core && pwd)" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -96,7 +96,7 @@ jobs:
         shell: bash
         run: |
           bash scripts/tier.sh "test (debug)" debug 440 30000 -- cargo test --locked --all-targets --features cli
-          bash scripts/test-floor.sh debug 235
+          bash scripts/core.sh test-floor debug 235
         env:
           EXPECT_OVERFLOW_CHECKS: "1"
       - name: keep the tier log
@@ -144,7 +144,7 @@ jobs:
         # the `test` job above for why it used to be two.
         shell: bash
         run: |
-          git clone --depth 1 --branch v0.2.14 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
+          git clone --depth 1 --branch v0.2.16 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
           echo "FS_CORE_ROOT=$(cd ../rust-fs-core && pwd)" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -166,7 +166,7 @@ jobs:
         shell: bash
         run: |
           bash scripts/tier.sh "test (release)" release 480 31000 -- cargo test --locked --release --all-targets --features cli
-          bash scripts/test-floor.sh release 235
+          bash scripts/core.sh test-floor release 235
       - name: keep the tier log
         if: always()
         uses: actions/upload-artifact@v4
@@ -186,7 +186,7 @@ jobs:
       # the docs step below was added. Same ref as every other job.
       - name: clone am-fs-core sibling
         shell: bash
-        run: git clone --depth 1 --branch v0.2.14 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
+        run: git clone --depth 1 --branch v0.2.16 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.95.0
@@ -238,6 +238,12 @@ jobs:
           echo "ran $ran script tests, $failed failed (floor $floor)"
           [ "$failed" -eq 0 ] || exit 1
           [ "$ran" -ge "$floor" ] || { echo "::error::ran $ran script tests, floor is $floor"; exit 1; }
+      # The family scripts are rust-fs-core's alone: this fails if a copy of
+      # one is committed here, scripts/core.sh differs from core's, or
+      # anything here still calls a local copy.
+      - name: no copy of a rust-fs-core family script
+        shell: bash
+        run: bash scripts/core.sh family-check
 
   # Cross-validates our reader/writer against `qemu-img`. qemu-img is
   # invoked as a subprocess only — never linked, never bundled. The
@@ -252,7 +258,7 @@ jobs:
         # the `test` job above for why it used to be two.
         shell: bash
         run: |
-          git clone --depth 1 --branch v0.2.14 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
+          git clone --depth 1 --branch v0.2.16 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
           echo "FS_CORE_ROOT=$(cd ../rust-fs-core && pwd)" >> "$GITHUB_ENV"
       - name: install qemu-utils
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-utils
@@ -286,7 +292,7 @@ jobs:
         shell: bash
         run: |
           bash scripts/tier.sh qemu-validation qemu 120 9000 -- cargo test --locked --features qemu-validation --test qemu_validation
-          bash scripts/test-floor.sh qemu 13
+          bash scripts/core.sh test-floor qemu 13
       # LINTED WHERE IT IS BUILT, AND ONLY HERE CAN IT BE.
       #
       # `cargo clippy --all-targets` in the other jobs compiles this file with
@@ -331,7 +337,7 @@ jobs:
         # the `test` job above for why it used to be two.
         shell: bash
         run: |
-          git clone --depth 1 --branch v0.2.14 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
+          git clone --depth 1 --branch v0.2.16 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
           echo "FS_CORE_ROOT=$(cd ../rust-fs-core && pwd)" >> "$GITHUB_ENV"
       - name: install qemu-utils, jq and man
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-utils jq man-db
@@ -353,7 +359,7 @@ jobs:
         shell: bash
         run: |
           bash scripts/tier.sh "test (cli)" cli 35 1300 -- bash scripts/test-cli.sh
-          bash scripts/test-floor.sh cli 319
+          bash scripts/core.sh test-floor cli 319
       # THE RELEASE TARBALL, PUT TOGETHER ON EVERY PULL REQUEST, so a release
       # is not the first time it is. scripts/package-cli.sh is what
       # release.yml runs: it lays out the install prefix from the binary
@@ -440,7 +446,7 @@ jobs:
       - name: clone am-fs-core sibling
         shell: bash
         run: |
-          git clone --depth 1 --branch v0.2.14 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
+          git clone --depth 1 --branch v0.2.16 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
           echo "FS_CORE_ROOT=$(cd ../rust-fs-core && pwd)" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -451,7 +457,7 @@ jobs:
           tool: cargo-semver-checks@${{ env.CARGO_SEMVER_CHECKS_VERSION }}
       - name: semver (quiet, budgeted)
         shell: bash
-        run: bash scripts/tier.sh semver semver 40 4000 -- scripts/semver-check.sh
+        run: bash scripts/tier.sh semver semver 40 4000 -- bash scripts/core.sh semver-check
 
   ci-ok:
     name: ci-ok
