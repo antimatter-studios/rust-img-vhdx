@@ -102,14 +102,18 @@ page and the crates.io download are the same bytes.
 
 The command-line tool is attached to the same release as a tarball per
 platform, `am-img-vhdx-X.Y.Z-darwin-arm64.tar.gz` and
-`am-img-vhdx-X.Y.Z-linux-x86_64.tar.gz`, built by the same workflow and
-attested the same way:
+`am-img-vhdx-X.Y.Z-linux-x86_64.tar.gz`. They are packaged and attested by
+rust-fs-core's shared `release-cli.yml` workflow, which this repository's
+`release.yml` calls, so that is the workflow their attestations name:
 
 ```sh
 gh attestation verify am-img-vhdx-X.Y.Z-darwin-arm64.tar.gz \
   --repo antimatter-studios/rust-img-vhdx \
-  --signer-workflow antimatter-studios/rust-img-vhdx/.github/workflows/release.yml
+  --signer-workflow antimatter-studios/rust-fs-core/.github/workflows/release-cli.yml
 ```
+
+Tarballs from releases up to 0.5.0 were packaged here, and their
+attestations name `antimatter-studios/rust-img-vhdx/.github/workflows/release.yml`.
 
 Each tarball is an install prefix, copied as it stands: `bin/rust-img-vhdx`
 and `bin/img.vhdx` (a relative symlink to it), the man pages and zsh, bash
