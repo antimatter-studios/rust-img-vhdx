@@ -11,6 +11,14 @@ repository = "https://github.com/antimatter-studios/rust-img-vhdx"
 # try to include it and fail on the nightly-only dependency.
 exclude = ["fuzz"]
 
+# THE RELEASE TARBALL is packaged by rust-fs-core's package-cli, run as
+# `scripts/core.sh package-cli`, from what is written here: every dotted name
+# the binary answers to, with its man section, and the licence files at the
+# root. The binary's `generate names` must list exactly these names.
+[package.metadata.package-cli]
+names = { "img.vhdx" = 1 }
+licenses = ["LICENSE"]
+
 [lib]
 name = "vhdx"
 crate-type = ["staticlib", "rlib"]
@@ -44,7 +52,7 @@ cli = ["dep:clap", "am-fs-core/cli"]
 qemu-validation = []
 
 [dependencies]
-am-fs-core = { path = "../rust-fs-core", version = "0.2.18" }
+am-fs-core = { path = "../rust-fs-core", version = "0.2.19" }
 # The command-line tool's argument parser, behind the `cli` feature (see the
 # `rust-img-vhdx` target above). No derive: the builder API keeps the tool's
 # command a function the man pages and completions can be made from.

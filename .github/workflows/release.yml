@@ -20,7 +20,7 @@ jobs:
 
       - name: clone am-fs-core sibling
         shell: bash
-        run: git clone --depth 1 --branch v0.2.18 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
+        run: git clone --depth 1 --branch v0.2.19 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -52,7 +52,7 @@ jobs:
 
       - name: clone am-fs-core sibling
         shell: bash
-        run: git clone --depth 1 --branch v0.2.18 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
+        run: git clone --depth 1 --branch v0.2.19 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
 
       - name: install qemu-utils
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-utils
@@ -83,7 +83,7 @@ jobs:
           persist-credentials: false
       - name: clone am-fs-core sibling (path dep)
         shell: bash
-        run: git clone --depth 1 --branch v0.2.18 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
+        run: git clone --depth 1 --branch v0.2.19 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable, 2026-09-27
         with:
           toolchain: 1.95.0
@@ -163,7 +163,7 @@ jobs:
   # every leg has passed, so a failed leg cannot leave a release with one
   # platform on it.
   #
-  # scripts/package-cli.sh lays the tarball out as an install prefix --
+  # scripts/core.sh package-cli lays the tarball out as an install prefix --
   # bin/rust-img-vhdx, bin/img.vhdx a relative symlink to it, the generated
   # man pages and completions under share/, share/rust-img-vhdx/CAVEATS and
   # LICENSE -- and checks the unpacked result: exactly that layout, and
@@ -188,7 +188,7 @@ jobs:
           persist-credentials: false
       - name: clone am-fs-core sibling (path dep)
         shell: bash
-        run: git clone --depth 1 --branch v0.2.18 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
+        run: git clone --depth 1 --branch v0.2.19 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.95.0
@@ -201,7 +201,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          tarball="$(scripts/package-cli.sh "${GITHUB_REF_NAME#v}" "${{ matrix.label }}")"
+          tarball="$(bash scripts/core.sh package-cli "${GITHUB_REF_NAME#v}" "${{ matrix.label }}")"
           echo "tarball=$tarball" >> "$GITHUB_OUTPUT"
           # A formula update is a copy of this, not a re-download and re-hash.
           {

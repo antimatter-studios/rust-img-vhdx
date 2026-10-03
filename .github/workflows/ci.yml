@@ -50,7 +50,7 @@ jobs:
         # spelling the scripts can use.
         shell: bash
         run: |
-          git clone --depth 1 --branch v0.2.18 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
+          git clone --depth 1 --branch v0.2.19 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
           echo "FS_CORE_ROOT=$(cd ../rust-fs-core && pwd)" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -144,7 +144,7 @@ jobs:
         # the `test` job above for why it used to be two.
         shell: bash
         run: |
-          git clone --depth 1 --branch v0.2.18 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
+          git clone --depth 1 --branch v0.2.19 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
           echo "FS_CORE_ROOT=$(cd ../rust-fs-core && pwd)" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -186,7 +186,7 @@ jobs:
       # the docs step below was added. Same ref as every other job.
       - name: clone am-fs-core sibling
         shell: bash
-        run: git clone --depth 1 --branch v0.2.18 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
+        run: git clone --depth 1 --branch v0.2.19 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.95.0
@@ -234,7 +234,9 @@ jobs:
             bash "$t" || failed=$((failed + 1))
             ran=$((ran + 1))
           done
-          floor=3
+          # 2: test-package-cli.sh moved to rust-fs-core with the script it
+          # tested (tests/package_cli.rs there), so one guard fewer is here.
+          floor=2
           echo "ran $ran script tests, $failed failed (floor $floor)"
           [ "$failed" -eq 0 ] || exit 1
           [ "$ran" -ge "$floor" ] || { echo "::error::ran $ran script tests, floor is $floor"; exit 1; }
@@ -258,7 +260,7 @@ jobs:
         # the `test` job above for why it used to be two.
         shell: bash
         run: |
-          git clone --depth 1 --branch v0.2.18 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
+          git clone --depth 1 --branch v0.2.19 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
           echo "FS_CORE_ROOT=$(cd ../rust-fs-core && pwd)" >> "$GITHUB_ENV"
       - name: install qemu-utils
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-utils
@@ -337,7 +339,7 @@ jobs:
         # the `test` job above for why it used to be two.
         shell: bash
         run: |
-          git clone --depth 1 --branch v0.2.18 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
+          git clone --depth 1 --branch v0.2.19 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
           echo "FS_CORE_ROOT=$(cd ../rust-fs-core && pwd)" >> "$GITHUB_ENV"
       - name: install qemu-utils, jq and man
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-utils jq man-db
@@ -361,8 +363,8 @@ jobs:
           bash scripts/tier.sh "test (cli)" cli 35 1300 -- bash scripts/test-cli.sh
           bash scripts/core.sh test-floor cli 319
       # THE RELEASE TARBALL, PUT TOGETHER ON EVERY PULL REQUEST, so a release
-      # is not the first time it is. scripts/package-cli.sh is what
-      # release.yml runs: it lays out the install prefix from the binary
+      # is not the first time it is. rust-fs-core's package-cli, run through
+      # scripts/core.sh, is what release.yml runs: it lays out the install prefix from the binary
       # just built and checks the unpacked result -- every member, each
       # dotted name a relative symlink to bin/rust-img-vhdx, every man page
       # and completion, CAVEATS at most four lines, every name's --version.
@@ -373,10 +375,7 @@ jobs:
           version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)"
           mkdir -p tmp/package
           cd tmp/package
-          bash ../../scripts/package-cli.sh "$version" linux-x86_64 ../../target/release
-      # And the packaging script refuses each way a build can be wrong.
-      - name: the packaging script refuses a wrong build
-        run: bash tests/scripts/test-package-cli.sh
+          bash ../../scripts/core.sh package-cli "$version" linux-x86_64 ../../target/release
       - name: keep the tier log
         if: always()
         uses: actions/upload-artifact@v4
@@ -446,7 +445,7 @@ jobs:
       - name: clone am-fs-core sibling
         shell: bash
         run: |
-          git clone --depth 1 --branch v0.2.18 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
+          git clone --depth 1 --branch v0.2.19 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
           echo "FS_CORE_ROOT=$(cd ../rust-fs-core && pwd)" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
         with:
