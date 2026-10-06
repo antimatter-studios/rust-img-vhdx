@@ -25,7 +25,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - name: clone am-fs-core sibling
+      - name: clone rust-fs-core sibling
         # ONE CLONE, SERVING BOTH THINGS CORE IS NEEDED FOR. It used to be
         # two, at two different pins:
         #
@@ -50,7 +50,7 @@ jobs:
         # spelling the scripts can use.
         shell: bash
         run: |
-          git clone --depth 1 --branch v0.2.23 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
+          git clone --depth 1 --branch v0.3.0 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
           echo "FS_CORE_ROOT=$(cd ../rust-fs-core && pwd)" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -139,12 +139,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: clone am-fs-core sibling
+      - name: clone rust-fs-core sibling
         # One clone, the path dependency AND the output-budget wrapper. See
         # the `test` job above for why it used to be two.
         shell: bash
         run: |
-          git clone --depth 1 --branch v0.2.23 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
+          git clone --depth 1 --branch v0.3.0 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
           echo "FS_CORE_ROOT=$(cd ../rust-fs-core && pwd)" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -184,9 +184,9 @@ jobs:
       # `cargo doc` RESOLVES THE PATH DEPENDENCY, even though `cargo fmt` does
       # not -- so this job needs core beside the checkout and did not before
       # the docs step below was added. Same ref as every other job.
-      - name: clone am-fs-core sibling
+      - name: clone rust-fs-core sibling
         shell: bash
-        run: git clone --depth 1 --branch v0.2.23 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
+        run: git clone --depth 1 --branch v0.3.0 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.95.0
@@ -255,12 +255,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: clone am-fs-core sibling
+      - name: clone rust-fs-core sibling
         # One clone, the path dependency AND the output-budget wrapper. See
         # the `test` job above for why it used to be two.
         shell: bash
         run: |
-          git clone --depth 1 --branch v0.2.23 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
+          git clone --depth 1 --branch v0.3.0 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
           echo "FS_CORE_ROOT=$(cd ../rust-fs-core && pwd)" >> "$GITHUB_ENV"
       - name: install qemu-utils
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-utils
@@ -334,12 +334,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: clone am-fs-core sibling
+      - name: clone rust-fs-core sibling
         # One clone, the path dependency AND the output-budget wrapper. See
         # the `test` job above for why it used to be two.
         shell: bash
         run: |
-          git clone --depth 1 --branch v0.2.23 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
+          git clone --depth 1 --branch v0.3.0 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
           echo "FS_CORE_ROOT=$(cd ../rust-fs-core && pwd)" >> "$GITHUB_ENV"
       - name: install qemu-utils, jq and man
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-utils jq man-db
@@ -443,10 +443,10 @@ jobs:
       OUTPUT_BUDGET_FAIL_TAIL: "200"
     steps:
       - uses: actions/checkout@v4
-      - name: clone am-fs-core sibling
+      - name: clone rust-fs-core sibling
         shell: bash
         run: |
-          git clone --depth 1 --branch v0.2.23 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
+          git clone --depth 1 --branch v0.3.0 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
           echo "FS_CORE_ROOT=$(cd ../rust-fs-core && pwd)" >> "$GITHUB_ENV"
       - uses: dtolnay/rust-toolchain@stable
         with:

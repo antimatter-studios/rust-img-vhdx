@@ -3,18 +3,6 @@
 version = 4
 
 [[package]]
-name = "am-fs-core"
-version = "0.2.23"
-
-[[package]]
-name = "am-img-vhdx"
-version = "0.5.0"
-dependencies = [
- "am-fs-core",
- "crc32c",
-]
-
-[[package]]
 name = "arbitrary"
 version = "1.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -97,6 +85,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
+name = "rust-fs-core"
+version = "0.3.0"
+
+[[package]]
+name = "rust-img-vhdx"
+version = "0.6.0"
+dependencies = [
+ "crc32c",
+ "rust-fs-core",
+]
+
+[[package]]
 name = "rustc_version"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -121,7 +121,7 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 name = "vhdx-fuzz"
 version = "0.0.0"
 dependencies = [
- "am-fs-core",
- "am-img-vhdx",
  "libfuzzer-sys",
+ "rust-fs-core",
+ "rust-img-vhdx",
 ]

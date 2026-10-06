@@ -187,12 +187,12 @@ fn the_header_tells_consumers_to_link_the_library_that_is_built() {
 /// that merely still handles the plain spelling proves nothing.
 #[test]
 fn the_lib_name_is_parsed_rather_than_scanned() {
-    let plain = "[package]\nname = \"am-img-vhdx\"\n\n[lib]\nname = \"vhdx\"\n";
-    let single_quoted = "[package]\nname = \"am-img-vhdx\"\n\n[lib]\nname = 'vhdx'\n";
+    let plain = "[package]\nname = \"rust-img-vhdx\"\n\n[lib]\nname = \"vhdx\"\n";
+    let single_quoted = "[package]\nname = \"rust-img-vhdx\"\n\n[lib]\nname = 'vhdx'\n";
     let trailing_comment =
-        "[package]\nname = \"am-img-vhdx\"\n\n[lib]\nname = \"vhdx\" # the exported ABI name\n";
+        "[package]\nname = \"rust-img-vhdx\"\n\n[lib]\nname = \"vhdx\" # the exported ABI name\n";
     let commented_section =
-        "[package]\nname = \"am-img-vhdx\"\n\n[lib] # the staticlib consumers link\nname = \"vhdx\"\n";
+        "[package]\nname = \"rust-img-vhdx\"\n\n[lib] # the staticlib consumers link\nname = \"vhdx\"\n";
 
     for (what, toml) in [
         ("the plain spelling", plain),
@@ -280,15 +280,15 @@ fn the_libname_is_parsed_rather_than_scanned() {
 /// The package name is not the library name.
 #[test]
 fn the_lib_name_comes_from_the_lib_section_and_not_the_package() {
-    let toml = "[package]\nname = \"am-img-vhdx\"\nversion = \"0.3.5\"\n\n\
+    let toml = "[package]\nname = \"rust-img-vhdx\"\nversion = \"0.3.5\"\n\n\
                 [lib]\nname = \"vhdx\"\ncrate-type = [\"staticlib\", \"rlib\"]\n";
     assert_eq!(
         lib_name(toml).as_deref(),
         Some("vhdx"),
-        "using the package name would look for libam-img-vhdx.a"
+        "using the package name would look for librust-img-vhdx.a"
     );
     // And a manifest with no [lib] section has no library name to give.
-    assert_eq!(lib_name("[package]\nname = \"am-img-vhdx\"\n"), None);
+    assert_eq!(lib_name("[package]\nname = \"rust-img-vhdx\"\n"), None);
 }
 
 /// AN INSTRUCTION, NOT A MENTION — AND NOT A NEGATION.

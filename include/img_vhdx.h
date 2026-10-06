@@ -1,8 +1,8 @@
 /*
- * am-img-vhdx C ABI — opens a VHDX (Microsoft VHD-successor) image
+ * rust-img-vhdx C ABI — opens a VHDX (Microsoft VHD-successor) image
  * and returns a generic FsCoreDevice handle.
  *
- * Link with libvhdx.a alongside fs_core.h.
+ * Link with libimg_vhdx.a alongside fs_core.h.
  *
  * `chore staticlib` builds that library and copies both headers beside
  * it; `chore artifact` prints the absolute path of the directory

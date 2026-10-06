@@ -23,8 +23,8 @@ use std::sync::Arc;
 
 use clap::{value_parser, Arg, ArgMatches, Command as Cmd};
 use fs_core::{BlockDevice, BlockRead, FileDevice};
-use vhdx::header::{Header, HEADER1_OFFSET, HEADER2_OFFSET, HEADER_SIZE};
-use vhdx::VhdxReader;
+use img_vhdx::header::{Header, HEADER1_OFFSET, HEADER2_OFFSET, HEADER_SIZE};
+use img_vhdx::VhdxReader;
 
 use super::overlay::Overlay;
 use fs_core::cli::{CliError, Json, Outcome, Tool};
@@ -221,9 +221,9 @@ fn run(matches: &ArgMatches) -> Result<Outcome, CliError> {
 /// image, a partially present block, a region or metadata item it does
 /// not know — is a verb this tool cannot do (exit 3); anything else
 /// failed.
-fn vhdx_error(image: &Path, e: vhdx::Error) -> CliError {
+fn vhdx_error(image: &Path, e: img_vhdx::Error) -> CliError {
     match e {
-        vhdx::Error::Unsupported(_) => {
+        img_vhdx::Error::Unsupported(_) => {
             CliError::not_implemented(format!("{}: {e}", image.display()))
         }
         other => CliError::failed(format!("{}: {other}", image.display())),
@@ -468,9 +468,9 @@ fn is_same_file(_input: &std::fs::File, _image: &Path) -> bool {
 /// A write the library refuses by what the image is (a block only partly
 /// present, a differencing image) is a verb it cannot do; anything else
 /// failed.
-fn write_error(image: &Path, e: vhdx::Error) -> CliError {
+fn write_error(image: &Path, e: img_vhdx::Error) -> CliError {
     match e {
-        vhdx::Error::Unsupported(why) => {
+        img_vhdx::Error::Unsupported(why) => {
             CliError::not_implemented(format!("write: {}: {why}", image.display()))
         }
         other => vhdx_error(image, other),
@@ -582,20 +582,20 @@ mod tests {
     fn what_the_library_refuses_is_not_implemented_and_the_rest_failed() {
         let p = Path::new("x.vhdx");
         assert_eq!(
-            vhdx_error(p, vhdx::Error::Unsupported("a differencing VHDX")).code,
+            vhdx_error(p, img_vhdx::Error::Unsupported("a differencing VHDX")).code,
             fs_core::cli::output::EXIT_UNSUPPORTED
         );
         assert!(
-            vhdx_error(p, vhdx::Error::Unsupported("a differencing VHDX"))
+            vhdx_error(p, img_vhdx::Error::Unsupported("a differencing VHDX"))
                 .message
                 .starts_with("not implemented: x.vhdx: ")
         );
         assert_eq!(
-            vhdx_error(p, vhdx::Error::NotVhdx).code,
+            vhdx_error(p, img_vhdx::Error::NotVhdx).code,
             fs_core::cli::output::EXIT_FAILED
         );
         assert_eq!(
-            vhdx_error(p, vhdx::Error::Corrupt("BAT")).code,
+            vhdx_error(p, img_vhdx::Error::Corrupt("BAT")).code,
             fs_core::cli::output::EXIT_FAILED
         );
     }

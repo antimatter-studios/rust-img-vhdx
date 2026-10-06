@@ -28,5 +28,5 @@ fuzz_target!(|data: &[u8]| {
     // ONE ENTRY POINT NOW, where there were two: the `Vec`-returning
     // wrapper is gone, because an empty `Vec` was how it reported both a
     // healthy log with nothing pending and a region it had refused (#41).
-    let _ = vhdx::log::collect_replay_chain(data, &guid);
+    let _ = img_vhdx::log::collect_replay_chain(data, &guid);
 });

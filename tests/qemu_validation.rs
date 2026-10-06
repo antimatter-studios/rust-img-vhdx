@@ -45,7 +45,7 @@ use std::process::Command;
 mod temp_path;
 use temp_path::TempPath;
 
-use vhdx::VhdxReader;
+use img_vhdx::VhdxReader;
 
 const QEMU_IMG: &str = "qemu-img";
 
@@ -162,7 +162,7 @@ fn patch_both_headers_u16(path: &Path, field_offset: usize, value: u16) {
         let at = slot as usize;
         assert_eq!(&bytes[at..at + 4], b"head", "slot {slot} is not a header");
         bytes[at + field_offset..at + field_offset + 2].copy_from_slice(&value.to_le_bytes());
-        let crc = vhdx::header::compute_crc(&bytes[at..at + HEADER_SIZE])
+        let crc = img_vhdx::header::compute_crc(&bytes[at..at + HEADER_SIZE])
             .expect("a full-size header slot");
         bytes[at + 4..at + 8].copy_from_slice(&crc.to_le_bytes());
     }
@@ -218,7 +218,7 @@ fn a_log_version_we_do_not_know_is_refused_like_qemu_refuses_it() {
     );
 
     match VhdxReader::open(&p) {
-        Err(vhdx::Error::Unsupported(msg)) => assert!(
+        Err(img_vhdx::Error::Unsupported(msg)) => assert!(
             msg.contains("log version"),
             "the refusal must name the log version, got {msg:?}"
         ),
@@ -257,7 +257,7 @@ fn add_region_entry(path: &Path, guid: [u8; 16], required: bool) {
         bytes[off + 28..off + 32].copy_from_slice(&(if required { 1u32 } else { 0 }).to_le_bytes());
         bytes[at + 8..at + 12].copy_from_slice(&((count + 1) as u32).to_le_bytes());
         bytes[at + 4..at + 8].fill(0);
-        let crc = vhdx::region_table::compute_crc(&bytes[at..at + TABLE_SIZE])
+        let crc = img_vhdx::region_table::compute_crc(&bytes[at..at + TABLE_SIZE])
             .expect("a full-size region table");
         bytes[at + 4..at + 8].copy_from_slice(&crc.to_le_bytes());
     }
@@ -292,7 +292,7 @@ fn an_unknown_required_region_is_refused_like_qemu_refuses_it() {
         "precondition: qemu must refuse an unknown required region"
     );
     match VhdxReader::open(&p) {
-        Err(vhdx::Error::Unsupported(msg)) => assert!(
+        Err(img_vhdx::Error::Unsupported(msg)) => assert!(
             msg.contains("region"),
             "the refusal must name the region, got {msg:?}"
         ),
@@ -332,7 +332,7 @@ fn metadata_region_offset(bytes: &[u8]) -> usize {
     let count = u32::from_le_bytes(bytes[at + 8..at + 12].try_into().unwrap()) as usize;
     (0..count)
         .map(|i| at + 16 + i * 32)
-        .find(|off| bytes[*off..*off + 16] == vhdx::region_table::guids::METADATA)
+        .find(|off| bytes[*off..*off + 16] == img_vhdx::region_table::guids::METADATA)
         .map(|off| u64::from_le_bytes(bytes[off + 16..off + 24].try_into().unwrap()) as usize)
         .expect("the region table names a metadata region")
 }
@@ -426,7 +426,7 @@ fn an_unknown_required_metadata_item_is_refused_like_qemu_refuses_it() {
         "precondition: qemu must refuse an unknown required metadata item"
     );
     match VhdxReader::open(&p) {
-        Err(vhdx::Error::Unsupported(msg)) => assert!(
+        Err(img_vhdx::Error::Unsupported(msg)) => assert!(
             msg.contains("metadata item"),
             "the refusal must name the metadata item, got {msg:?}"
         ),
@@ -602,7 +602,7 @@ fn patch_both_headers_log_offset(path: &Path, value: u64) {
         assert_eq!(&bytes[at..at + 4], b"head", "slot {slot} is not a header");
         bytes[at + LOG_OFFSET_OFFSET..at + LOG_OFFSET_OFFSET + 8]
             .copy_from_slice(&value.to_le_bytes());
-        let crc = vhdx::header::compute_crc(&bytes[at..at + HEADER_SIZE])
+        let crc = img_vhdx::header::compute_crc(&bytes[at..at + HEADER_SIZE])
             .expect("a full-size header slot");
         bytes[at + 4..at + 8].copy_from_slice(&crc.to_le_bytes());
     }
@@ -672,7 +672,7 @@ fn a_log_region_on_top_of_another_region_is_refused_like_qemu_refuses_it() {
     );
 
     match VhdxReader::open_rw(&p) {
-        Err(vhdx::Error::Corrupt(msg)) => assert!(
+        Err(img_vhdx::Error::Corrupt(msg)) => assert!(
             msg.contains("log region"),
             "the refusal must name the log region, got {msg:?}"
         ),
