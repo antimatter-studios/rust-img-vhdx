@@ -5,7 +5,15 @@ Notable changes to `am-img-vhdx`, newest first. This is a `0.x` crate, so the
 never does.
 
 
-## [Unreleased]
+## [0.5.1] — 2026-10-06
+
+### Renamed
+
+- **The last version published as `am-img-vhdx`.** The crate is renamed to
+  `rust-img-vhdx`, the repository's name; every later version is published under
+  that name only, starting at 0.6.0. The description and the README say where
+  the crate went. The import changes too: `use vhdx::...` becomes `use img_vhdx::...`.
+
 
 ### Changed
 
