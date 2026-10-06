@@ -472,7 +472,7 @@ fn the_tool_tarballs_are_released_by_core_release_cli() {
     ] {
         assert!(
             !Path::new(env!("CARGO_MANIFEST_DIR")).join(copy).exists(),
-            "{copy} is a local copy of rust-fs-core's packaging; run it as scripts/core.sh package-cli"
+            "{copy} is a local copy of rust-fs-core's packaging; run it as ../rust-fs-core/scripts/package-cli.sh"
         );
     }
 }
@@ -542,7 +542,7 @@ fn the_release_cli_reader_discriminates() {
     expect(
         good.replace(
             "      - run: cargo test\n",
-            "      - run: bash scripts/core.sh package-cli 1.0.0 x\n",
+            "      - run: bash ../rust-fs-core/scripts/package-cli.sh 1.0.0 x\n",
         ),
         "packages or attests the tarballs itself",
     );

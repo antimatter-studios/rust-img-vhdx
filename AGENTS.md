@@ -227,46 +227,16 @@ region, so growing it is not something a caller can ask for by writing.
 
 ## The output budget comes from rust-fs-core, at run time
 
-Every tier goes through `scripts/tier.sh`, and the wrapper it runs — the
-thing that keeps a run quiet, logs all of it and fails a run that printed
-more than its budget — is **rust-fs-core's `scripts/output-budget.sh`**.
-There is no copy of it in this repository and there must not be one again
-(rust-fs-core#153): the family had several copies, reached four different
-ways, each internally consistent and nothing comparing them.
-
-`tier.sh` resolves it in this order, takes the **first candidate that
-exists**, and **refuses** rather than falling through:
-
-1. `$FS_CORE_ROOT/scripts/output-budget.sh`, when that variable is set;
-2. `../rust-fs-core/scripts/output-budget.sh`, the sibling. Sibling before
-   cargo is load-bearing: this suite runs on `windows-latest` under Git Bash,
-   where `cargo metadata` answers with a `C:\...` path that Git Bash can
-   neither test nor copy;
-3. the `rust-fs-core` package root `cargo metadata` names.
-
-Whichever it finds is then **verified by running it**: `--version` must
-answer exactly `rust-fs-core-output-budget 1`. A wrapper that is present and
-answers something else is fatal. It is not pinned by SHA-256 — a digest in
-seven repositories has to be raised in seven repositories for every edit to
-one file, which is the lockstep this arrangement removes.
+Every tier runs through rust-fs-core's `scripts/tier.sh`, **run in place**
+from the `../rust-fs-core` checkout at the version this repository pins:
+`bash ../rust-fs-core/scripts/tier.sh LABEL LOG LINES BYTES -- COMMAND`.
+There is no copy of it, of `scripts/output-budget.sh`, or of any other family
+script in this repository, and rust-fs-core's `family-check` (run in CI)
+refuses one. Bumping the pinned core version is how the scripts are upgraded;
+nothing is recopied. See rust-fs-core#153 and #212.
 
 **`OUTPUT_BUDGET_VERBOSE`, not `FLTH_VERBOSE`.** The canonical script does
-not read the old name, and setting it does nothing at all — no error, the run
-simply stays quiet. If `--verbose` ever stops streaming, that is the first
-thing to check.
-
-### One core pin now, where there used to be two
-
-`ci.yml` clones `../rust-fs-core` once, at **v0.2.14**, and exports
-`FS_CORE_ROOT` at it. That is both the crate this one compiles against and the
-checkout the wrapper comes from.
-
-It was two clones at two numbers: the dependency held at v0.2.10 by the
-allocation problem above, and the wrapper needing v0.2.13 — the first release
-with the quiet-failure behaviour, where v0.2.11 is the first that ships the
-script at all. A shell script this repository runs is not code it links, so
-the two pins were genuinely independent. #117 moved the dependency to the
-number the tooling already needed, and they became one.
+not read the old name, and setting it does nothing at all.
 
 ## What gates a merge
 
