@@ -1,5 +1,19 @@
 # vhdx
 
+> **Renamed to [`rust-img-vhdx`](https://crates.io/crates/rust-img-vhdx).**
+> `am-img-vhdx` 0.5.1 is the last version published under this name. New versions
+> are published only as `rust-img-vhdx`, starting at 0.6.0. To move, change one line
+> in `Cargo.toml`:
+>
+> ```toml
+> # before
+> am-img-vhdx = "0.5"
+> # after
+> rust-img-vhdx = "0.6"
+> ```
+>
+> The import changes too: `use vhdx::...` becomes `use img_vhdx::...`.
+
 Pure-Rust reader/writer for the VHDX virtual-disk format — VHD's modern
 successor, used by Hyper-V and WSL2 on Windows. Spec implemented from
 Microsoft's published format documentation; no GPL code is copied or

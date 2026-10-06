@@ -7,6 +7,16 @@ never does.
 
 ## [Unreleased]
 
+## [0.5.1] — 2026-10-06
+
+### Renamed
+
+- **The last version published as `am-img-vhdx`.** The crate is renamed to
+  `rust-img-vhdx`, the repository's name; every later version is published under
+  that name only, starting at 0.6.0. The description and the README say where
+  the crate went. The import changes too: `use vhdx::...` becomes `use img_vhdx::...`.
+
+
 ### Changed
 
 - **The release tarballs are packaged, attested and attached by
@@ -516,7 +526,8 @@ never does.
 
 - `am-fs-core` dependency moves to 0.2.
 
-[Unreleased]: https://github.com/antimatter-studios/rust-img-vhdx/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/antimatter-studios/rust-img-vhdx/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/antimatter-studios/rust-img-vhdx/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/antimatter-studios/rust-img-vhdx/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/antimatter-studios/rust-img-vhdx/compare/v0.3.5...v0.4.0
 [0.3.5]: https://github.com/antimatter-studios/rust-img-vhdx/compare/v0.3.4...v0.3.5
