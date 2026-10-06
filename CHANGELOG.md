@@ -5,15 +5,6 @@ Notable changes to `rust-img-vhdx` (published as `am-img-vhdx` until its last ve
 never does.
 
 
-## [0.6.0] — 2026-10-06
-
-### Changed
-
-- **Published as `rust-img-vhdx`, the repository's name.** The crate was `am-img-vhdx`
-  until its last version, which stays on crates.io pointing here. A
-  dependent changes one line in `Cargo.toml`; the import moves from `vhdx` to `img_vhdx`, and the C symbols are unchanged.
-- **Depends on `rust-fs-core` 0.3.0**, the same library under its new name.
-
 ## [Unreleased]
 
 ### Changed
@@ -26,6 +17,15 @@ never does.
   takes the GitHub release's body from `scripts/core.sh release-notes` and
   refuses a tag the CHANGELOG does not describe, before anything is
   published (rust-fs-core#209). It depends on rust-fs-core 0.3.1.
+
+## [0.6.0] — 2026-10-06
+
+### Changed
+
+- **Published as `rust-img-vhdx`, the repository's name.** The crate was `am-img-vhdx`
+  until its last version, which stays on crates.io pointing here. A
+  dependent changes one line in `Cargo.toml`; the import moves from `vhdx` to `img_vhdx`, and the C symbols are unchanged.
+- **Depends on `rust-fs-core` 0.3.0**, the same library under its new name.
 
 ## [0.5.1] — 2026-10-06
 
