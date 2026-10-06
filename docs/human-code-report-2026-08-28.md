@@ -1,4 +1,4 @@
-# Human-Code Report — am-img-vhdx
+# Human-Code Report — rust-img-vhdx
 
 **Date:** 2026-08-28
 **Scope:** full crate (`src/*.rs`, 2,157 lines; `tests/*.rs`, 1,222 lines)

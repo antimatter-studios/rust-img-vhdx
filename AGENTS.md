@@ -153,7 +153,7 @@ it**. Do not silence output to fit, and do not route around `tier.sh`.
 <!-- END SHARED BLOCK: agent-core v2 -->
 ## What this is
 
-Pure-Rust VHDX reader and writer over `am-fs-core`, linked into the app as a
+Pure-Rust VHDX reader and writer over `rust-fs-core`, linked into the app as a
 staticlib.
 
 ## Running tests
@@ -242,7 +242,7 @@ exists**, and **refuses** rather than falling through:
    cargo is load-bearing: this suite runs on `windows-latest` under Git Bash,
    where `cargo metadata` answers with a `C:\...` path that Git Bash can
    neither test nor copy;
-3. the `am-fs-core` package root `cargo metadata` names.
+3. the `rust-fs-core` package root `cargo metadata` names.
 
 Whichever it finds is then **verified by running it**: `--version` must
 answer exactly `rust-fs-core-output-budget 1`. A wrapper that is present and

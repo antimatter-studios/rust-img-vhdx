@@ -11,7 +11,7 @@ mod common;
 use std::io::{Seek, SeekFrom, Write};
 
 use common::*;
-use vhdx::{Error, VhdxReader};
+use img_vhdx::{Error, VhdxReader};
 
 /// A 1 MiB block whose bytes are `i & 0xFF`, so reads are verifiable.
 fn ramp_block() -> Box<[u8; BLOCK_SIZE as usize]> {
@@ -49,8 +49,8 @@ fn patch_header_field(path: &std::path::Path, slot: u64, field_offset: usize, by
     let mut image = std::fs::read(path).unwrap();
     let at = slot as usize;
     image[at + field_offset..at + field_offset + bytes.len()].copy_from_slice(bytes);
-    let crc =
-        vhdx::header::compute_crc(&image[at..at + HEADER_SIZE]).expect("a full-size header slot");
+    let crc = img_vhdx::header::compute_crc(&image[at..at + HEADER_SIZE])
+        .expect("a full-size header slot");
     image[at + 4..at + 8].copy_from_slice(&crc.to_le_bytes());
     std::fs::write(path, &image).unwrap();
 }
@@ -265,7 +265,7 @@ fn append_region_entry(path: &std::path::Path, table_offset: u64, guid: [u8; 16]
     image[off + 28..off + 32].copy_from_slice(&u32::from(required).to_le_bytes());
     image[at + 8..at + 12].copy_from_slice(&((count + 1) as u32).to_le_bytes());
     image[at + 4..at + 8].fill(0);
-    let crc = vhdx::region_table::compute_crc(&image[at..at + REGION_TABLE_SIZE])
+    let crc = img_vhdx::region_table::compute_crc(&image[at..at + REGION_TABLE_SIZE])
         .expect("a full-size region table");
     image[at + 4..at + 8].copy_from_slice(&crc.to_le_bytes());
     std::fs::write(path, &image).unwrap();
@@ -282,13 +282,13 @@ fn falls_back_to_header2_when_header1_version_is_unsupported() {
     let log_guid = [0x77u8; 16];
     let log_offset = 4 * ONE_MIB;
     let log_length = ONE_MIB as u32;
-    let entry = vhdx::log::encode_entry(
+    let entry = img_vhdx::log::encode_entry(
         2,
         0,
         &log_guid,
         8 * ONE_MIB,
         8 * ONE_MIB,
-        &[vhdx::log::PendingWrite {
+        &[img_vhdx::log::PendingWrite {
             file_offset: DATA_BLOCK_OFFSET,
             sector: vec![0xEE; 4096],
         }],
@@ -541,13 +541,13 @@ fn a_replayable_chain_at_a_hostile_log_offset_does_not_erase_the_region() {
 
     const MARKER_AT: u64 = BIG_METADATA_OFFSET + 512 * 1024;
     let log_guid = [0x77u8; 16];
-    let entry = vhdx::log::encode_entry(
+    let entry = img_vhdx::log::encode_entry(
         2,
         0,
         &log_guid,
         BIG_TOTAL_FILE_SIZE,
         BIG_TOTAL_FILE_SIZE,
-        &[vhdx::log::PendingWrite {
+        &[img_vhdx::log::PendingWrite {
             file_offset: BIG_DATA_BLOCK0_OFFSET + 8192,
             sector: vec![0xEEu8; 4096],
         }],
@@ -612,13 +612,13 @@ fn a_refused_image_is_not_written_to_by_the_replay_that_precedes_the_refusal() {
 
     const TARGET: u64 = BIG_DATA_BLOCK0_OFFSET + 8192;
     let log_guid = [0x77u8; 16];
-    let entry = vhdx::log::encode_entry(
+    let entry = img_vhdx::log::encode_entry(
         2,
         0,
         &log_guid,
         BIG_TOTAL_FILE_SIZE,
         BIG_TOTAL_FILE_SIZE,
-        &[vhdx::log::PendingWrite {
+        &[img_vhdx::log::PendingWrite {
             file_offset: TARGET,
             sector: vec![0xEEu8; 4096],
         }],
@@ -696,13 +696,13 @@ fn a_forged_chain_that_would_erase_the_image_is_refused_before_it_runs() {
     let log_guid = [0x77u8; 16];
     // Eight sectors of zeros starting at offset 0: the file identifier,
     // both headers, and the region tables.
-    let zeros: Vec<vhdx::log::PendingWrite> = (0..8u64)
-        .map(|i| vhdx::log::PendingWrite {
+    let zeros: Vec<img_vhdx::log::PendingWrite> = (0..8u64)
+        .map(|i| img_vhdx::log::PendingWrite {
             file_offset: i * 4096,
             sector: vec![0u8; 4096],
         })
         .collect();
-    let entry = vhdx::log::encode_entry(
+    let entry = img_vhdx::log::encode_entry(
         2,
         0,
         &log_guid,
@@ -763,15 +763,15 @@ fn a_replay_that_moves_a_region_onto_the_log_is_refused_after_it_runs() {
     // Innocuous on disk beforehand — it is not there yet.
     let hostile_table = encode_region_table(BIG_LOG_OFFSET, 4096, BIG_METADATA_OFFSET);
     let log_guid = [0x77u8; 16];
-    let writes: Vec<vhdx::log::PendingWrite> = hostile_table
+    let writes: Vec<img_vhdx::log::PendingWrite> = hostile_table
         .chunks(4096)
         .enumerate()
-        .map(|(i, chunk)| vhdx::log::PendingWrite {
+        .map(|(i, chunk)| img_vhdx::log::PendingWrite {
             file_offset: REGION_TABLE1_OFFSET + (i as u64) * 4096,
             sector: chunk.to_vec(),
         })
         .collect();
-    let entry = vhdx::log::encode_entry(
+    let entry = img_vhdx::log::encode_entry(
         2,
         0,
         &log_guid,

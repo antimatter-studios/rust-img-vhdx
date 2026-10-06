@@ -51,8 +51,8 @@
 #      manifest_path cargo reports there is a Windows path (C:\...) that Git
 #      Bash can neither test with -f nor hand to cp. The sibling path is
 #      POSIX on every runner, and the manifest already names that directory
-#      -- am-fs-core is `{ path = "../rust-fs-core" }`.
-#   3. whatever `cargo metadata` says the am-fs-core package root is. With a
+#      -- rust-fs-core is `{ path = "../rust-fs-core" }`.
+#   3. whatever `cargo metadata` says the rust-fs-core package root is. With a
 #      path dependency that is the same directory as 2, so this only starts
 #      to answer something new if the manifest ever moves to a plain version
 #      requirement against the published crate.
@@ -106,7 +106,7 @@ expected() {
     echo "         Expected one of:" >&2
     echo "           \$FS_CORE_ROOT/scripts/output-budget.sh   (FS_CORE_ROOT=${FS_CORE_ROOT:-unset})" >&2
     echo "           $REPO/../rust-fs-core/scripts/output-budget.sh" >&2
-    echo "           <am-fs-core package root>/scripts/output-budget.sh, per cargo metadata" >&2
+    echo "           <rust-fs-core package root>/scripts/output-budget.sh, per cargo metadata" >&2
     echo "         answering '$OUTPUT_BUDGET_API' to --version." >&2
     echo "         The wrapper lives in antimatter-studios/rust-fs-core and is" >&2
     echo "         shipped from $CORE_MIN_REF onwards; this repository pins the" >&2
@@ -124,7 +124,7 @@ core_root_from_cargo() {
     [ -n "$json" ] || return 0
     if command -v jq >/dev/null 2>&1; then
         printf '%s' "$json" | jq -r \
-            'first(.packages[] | select(.name == "am-fs-core") | .manifest_path) // ""' \
+            'first(.packages[] | select(.name == "rust-fs-core") | .manifest_path) // ""' \
             | sed 's![/\\][^/\\]*$!!'
         return 0
     fi
@@ -134,7 +134,7 @@ core_root_from_cargo() {
         printf '%s' "$json" | "$python" -c '
 import json, re, sys
 packages = json.load(sys.stdin)["packages"]
-path = next((p["manifest_path"] for p in packages if p["name"] == "am-fs-core"), "")
+path = next((p["manifest_path"] for p in packages if p["name"] == "rust-fs-core"), "")
 print(re.sub(r"[/\\\\][^/\\\\]*$", "", path))
 '
         return 0
@@ -153,7 +153,7 @@ elif [ -f "$REPO/../rust-fs-core/scripts/output-budget.sh" ]; then
 else
     CORE_ROOT="$(core_root_from_cargo)"
     BUDGET_SRC="${CORE_ROOT:-}/scripts/output-budget.sh"
-    BUDGET_FROM="the am-fs-core package cargo metadata named"
+    BUDGET_FROM="the rust-fs-core package cargo metadata named"
 fi
 
 if [ ! -f "$BUDGET_SRC" ]; then

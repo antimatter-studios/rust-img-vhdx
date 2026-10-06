@@ -303,13 +303,13 @@ pub fn pattern_block(seed: u8) -> Box<[u8; BIG_BLOCK_SIZE as usize]> {
 /// in slot 2, at sequence 5.
 pub fn inject_dirty_log(path: &std::path::Path, log_guid: [u8; 16]) {
     let sector = vec![0xEEu8; 4096];
-    let entry = vhdx::log::encode_entry(
+    let entry = img_vhdx::log::encode_entry(
         2,
         0,
         &log_guid,
         BIG_TOTAL_FILE_SIZE,
         BIG_TOTAL_FILE_SIZE,
-        &[vhdx::log::PendingWrite {
+        &[img_vhdx::log::PendingWrite {
             file_offset: BIG_DATA_BLOCK0_OFFSET + 8192,
             sector,
         }],

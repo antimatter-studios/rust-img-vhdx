@@ -5,6 +5,6 @@
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
-    let _ = vhdx::header::Header::parse(data);
-    let _ = vhdx::header::compute_crc(data);
+    let _ = img_vhdx::header::Header::parse(data);
+    let _ = img_vhdx::header::compute_crc(data);
 });

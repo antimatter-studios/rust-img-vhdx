@@ -324,17 +324,17 @@ fn read(rel: &str) -> String {
 }
 
 /// The core tag this repository builds against: `v` and Cargo.toml's
-/// am-fs-core version, which is the tag every workflow clones.
+/// rust-fs-core version, which is the tag every workflow clones.
 fn pinned_core_ref() -> String {
     let table: toml::Table = read("Cargo.toml")
         .parse()
         .expect("Cargo.toml parses as TOML");
     let version = table
         .get("dependencies")
-        .and_then(|d| d.get("am-fs-core"))
+        .and_then(|d| d.get("rust-fs-core"))
         .and_then(|c| c.get("version"))
         .and_then(toml::Value::as_str)
-        .expect("Cargo.toml pins an am-fs-core version");
+        .expect("Cargo.toml pins an rust-fs-core version");
     format!("v{version}")
 }
 
@@ -424,7 +424,7 @@ fn release_cli_gaps(yaml: &str, core_ref: &str, toolchain: &str) -> Vec<String> 
         };
         if with("core-ref") != core_ref {
             gaps.push(format!(
-                "job {name} passes core-ref {:?}, not Cargo.toml's am-fs-core {core_ref:?}",
+                "job {name} passes core-ref {:?}, not Cargo.toml's rust-fs-core {core_ref:?}",
                 with("core-ref")
             ));
         }

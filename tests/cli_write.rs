@@ -72,7 +72,7 @@ fn write_refuses_an_input_past_the_virtual_disk_by_its_length() {
         "{}",
         String::from_utf8_lossy(&wrote.stderr)
     );
-    let r = vhdx::VhdxReader::open(&image).unwrap();
+    let r = img_vhdx::VhdxReader::open(&image).unwrap();
     let mut back = [0u8; 6];
     r.read_at(511, &mut back).unwrap();
     assert_eq!(&back, b"\x33fits\x33");
@@ -153,7 +153,7 @@ fn write_into_an_image_with_a_log_to_replay_keeps_the_logged_sector() {
         "false",
         "the write left the log to replay"
     );
-    let r = vhdx::VhdxReader::open(&image).unwrap();
+    let r = img_vhdx::VhdxReader::open(&image).unwrap();
     let mut got = vec![0u8; 20100];
     r.read_at(0, &mut got).unwrap();
     assert_eq!(&got[..8192], &block0[..8192], "before the logged sector");

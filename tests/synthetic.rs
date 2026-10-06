@@ -10,7 +10,7 @@ mod common;
 use std::io::{Read, Seek, SeekFrom, Write};
 
 use common::*;
-use vhdx::VhdxReader;
+use img_vhdx::VhdxReader;
 
 #[test]
 fn fully_present_block_round_trips() {
@@ -66,7 +66,7 @@ fn out_of_bounds_read_errors() {
     let r = VhdxReader::open(&path).unwrap();
     let mut buf = [0u8; 16];
     match r.read_at(VIRTUAL_DISK_SIZE - 8, &mut buf) {
-        Err(vhdx::Error::OutOfBounds { offset, len, size }) => {
+        Err(img_vhdx::Error::OutOfBounds { offset, len, size }) => {
             assert_eq!(
                 offset,
                 VIRTUAL_DISK_SIZE - 8,
@@ -298,7 +298,7 @@ fn open_rw_on_device_rejects_readonly_inner() {
 
     let dev = std::sync::Arc::new(fs_core::FileDevice::open(&path).unwrap());
     match VhdxReader::open_rw_on_device(dev) {
-        Err(vhdx::Error::ReadOnly) => {}
+        Err(img_vhdx::Error::ReadOnly) => {}
         Err(e) => panic!("expected ReadOnly, got: {e}"),
         Ok(_) => panic!("expected ReadOnly, got Ok"),
     }
@@ -312,7 +312,7 @@ fn ro_open_rejects_write() {
 
     let r = VhdxReader::open(&path).unwrap();
     let err = r.write_at(0, b"x").unwrap_err();
-    assert!(matches!(err, vhdx::Error::ReadOnly));
+    assert!(matches!(err, img_vhdx::Error::ReadOnly));
 }
 
 /// Writing into a PartiallyPresent block is refused, not silently
@@ -682,7 +682,7 @@ fn a_pending_log_on_a_read_only_device_is_still_refused() {
 
     let dev = std::sync::Arc::new(fs_core::FileDevice::open(&path).unwrap());
     match VhdxReader::open_on_device(dev) {
-        Err(vhdx::Error::LogNeedsReplay) => {}
+        Err(img_vhdx::Error::LogNeedsReplay) => {}
         Err(e) => panic!("expected LogNeedsReplay, got: {e}"),
         Ok(_) => panic!("a log with unapplied entries was opened on a read-only device"),
     }
@@ -749,18 +749,18 @@ fn a_block_a_replay_allocated_past_the_old_end_reads_back() {
     bat_sector[8..16].copy_from_slice(&entry_1.to_le_bytes());
     let payload = vec![0xABu8; 4096];
     let grown_to = tail + 2 * 4096;
-    let entry = vhdx::log::encode_entry(
+    let entry = img_vhdx::log::encode_entry(
         2,
         0,
         &log_guid,
         grown_to,
         grown_to,
         &[
-            vhdx::log::PendingWrite {
+            img_vhdx::log::PendingWrite {
                 file_offset: tail + 4096,
                 sector: payload.clone(),
             },
-            vhdx::log::PendingWrite {
+            img_vhdx::log::PendingWrite {
                 file_offset: BIG_BAT_OFFSET,
                 sector: bat_sector,
             },
@@ -829,13 +829,13 @@ fn a_replayed_allocation_named_only_by_last_file_offset_reads_as_zeros() {
     let entry_1 = ((tail / ONE_MIB) << 20) | 6;
     bat_sector[8..16].copy_from_slice(&entry_1.to_le_bytes());
     let block_end = tail + u64::from(BIG_BLOCK_SIZE);
-    let entry = vhdx::log::encode_entry(
+    let entry = img_vhdx::log::encode_entry(
         2,
         0,
         &log_guid,
         block_end,
         block_end,
-        &[vhdx::log::PendingWrite {
+        &[img_vhdx::log::PendingWrite {
             file_offset: BIG_BAT_OFFSET,
             sector: bat_sector,
         }],
@@ -1284,11 +1284,11 @@ fn a_dirty_log_whose_chain_cannot_be_assembled_is_refused_at_open() {
     // twice because `tail` is an offset and the entry's own length is what
     // that offset has to clear; the first call is only there to measure it,
     // and the two differ in nothing else.
-    let write = || vhdx::log::PendingWrite {
+    let write = || img_vhdx::log::PendingWrite {
         file_offset: BIG_DATA_BLOCK0_OFFSET + 8192,
         sector: vec![0xEEu8; 4096],
     };
-    let measured = vhdx::log::encode_entry(
+    let measured = img_vhdx::log::encode_entry(
         2,
         0,
         &[0x77u8; 16],
@@ -1297,7 +1297,7 @@ fn a_dirty_log_whose_chain_cannot_be_assembled_is_refused_at_open() {
         &[write()],
     );
     let nowhere = u32::try_from(measured.len()).expect("the entry is far short of 4 GiB");
-    let entry = vhdx::log::encode_entry(
+    let entry = img_vhdx::log::encode_entry(
         2,
         nowhere,
         &[0x77u8; 16],
@@ -1313,7 +1313,7 @@ fn a_dirty_log_whose_chain_cannot_be_assembled_is_refused_at_open() {
         .err()
         .expect("a log whose chain cannot be assembled opened as though it were clean");
     match err {
-        vhdx::Error::LogUnassembled(m) => assert!(
+        img_vhdx::Error::LogUnassembled(m) => assert!(
             m.contains("tail"),
             "the refusal does not name what could not be resolved: {m}"
         ),
@@ -1336,7 +1336,7 @@ fn a_dirty_log_whose_chain_cannot_be_assembled_is_refused_at_open() {
     assert!(
         matches!(
             VhdxReader::open_on_device(ro),
-            Err(vhdx::Error::LogUnassembled(_))
+            Err(img_vhdx::Error::LogUnassembled(_))
         ),
         "a read-only open was served the stale bytes"
     );

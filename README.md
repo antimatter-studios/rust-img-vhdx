@@ -1,19 +1,5 @@
 # vhdx
 
-> **Renamed to [`rust-img-vhdx`](https://crates.io/crates/rust-img-vhdx).**
-> `am-img-vhdx` 0.5.1 is the last version published under this name. New versions
-> are published only as `rust-img-vhdx`, starting at 0.6.0. To move, change one line
-> in `Cargo.toml`:
->
-> ```toml
-> # before
-> am-img-vhdx = "0.5"
-> # after
-> rust-img-vhdx = "0.6"
-> ```
->
-> The import changes too: `use vhdx::...` becomes `use img_vhdx::...`.
-
 Pure-Rust reader/writer for the VHDX virtual-disk format — VHD's modern
 successor, used by Hyper-V and WSL2 on Windows. Spec implemented from
 Microsoft's published format documentation; no GPL code is copied or
@@ -28,7 +14,7 @@ linked.
 - [x] Metadata (file parameters, virtual disk size, logical sector size).
 - [x] BAT walking with chunk-ratio aware decoding (data + sector-bitmap
       entry interleave).
-- [x] `BlockRead + BlockDevice` impls via `am-fs-core`.
+- [x] `BlockRead + BlockDevice` impls via `rust-fs-core`.
 - [x] Device-backed reader — opens on top of any
       `Arc<dyn fs_core::BlockDevice>` (file, FSKit block resource,
       slice, callback-backed device).
@@ -104,8 +90,8 @@ repository, not uploaded from someone's machine. To check the crates.io
 download of version `X.Y.Z`:
 
 ```sh
-curl -sSfLo am-img-vhdx-X.Y.Z.crate https://static.crates.io/crates/am-img-vhdx/am-img-vhdx-X.Y.Z.crate
-gh attestation verify am-img-vhdx-X.Y.Z.crate \
+curl -sSfLo rust-img-vhdx-X.Y.Z.crate https://static.crates.io/crates/rust-img-vhdx/rust-img-vhdx-X.Y.Z.crate
+gh attestation verify rust-img-vhdx-X.Y.Z.crate \
   --repo antimatter-studios/rust-img-vhdx \
   --signer-workflow antimatter-studios/rust-img-vhdx/.github/workflows/release.yml
 ```
@@ -115,13 +101,13 @@ checksum crates.io records for that version, so the file on the release
 page and the crates.io download are the same bytes.
 
 The command-line tool is attached to the same release as a tarball per
-platform, `am-img-vhdx-X.Y.Z-darwin-arm64.tar.gz` and
-`am-img-vhdx-X.Y.Z-linux-x86_64.tar.gz`. They are packaged and attested by
+platform, `rust-img-vhdx-X.Y.Z-darwin-arm64.tar.gz` and
+`rust-img-vhdx-X.Y.Z-linux-x86_64.tar.gz`. They are packaged and attested by
 rust-fs-core's shared `release-cli.yml` workflow, which this repository's
 `release.yml` calls, so that is the workflow their attestations name:
 
 ```sh
-gh attestation verify am-img-vhdx-X.Y.Z-darwin-arm64.tar.gz \
+gh attestation verify rust-img-vhdx-X.Y.Z-darwin-arm64.tar.gz \
   --repo antimatter-studios/rust-img-vhdx \
   --signer-workflow antimatter-studios/rust-fs-core/.github/workflows/release-cli.yml
 ```

@@ -16,13 +16,13 @@ chore_min_version: 0.6.0
 #
 # `artifact` PRINTS A DIRECTORY, NOT A FILE. That is the one place this
 # differs from rust-blk-probe, whose single binary lets its `artifact` name
-# a file: this crate produces libvhdx.a AND the headers beside it, so
+# a file: this crate produces libimg_vhdx.a AND the headers beside it, so
 # there is no single path to name.
 #
 # WHY fs_core.h IS COPIED TOO. include/vhdx.h opens with
 # `#include "fs_core.h"` — this crate's C ABI hands out FsCoreDevice handles —
-# so a consumer given only vhdx.h cannot compile. The path below is the same
-# one Cargo.toml resolves am-fs-core from, and NOTHING CHECKS THAT THE TWO
+# so a consumer given only img_vhdx.h cannot compile. The path below is the same
+# one Cargo.toml resolves rust-fs-core from, and NOTHING CHECKS THAT THE TWO
 # AGREE.
 # QUIET BY DEFAULT, --verbose ON REQUEST, AND THE BUDGET IS A NUMBER.
 #
@@ -95,7 +95,7 @@ chore_min_version: 0.6.0
 #   (rust-fs-core#153), because a committed copy is a copy that drifts and
 #   the family had several, each internally consistent and nothing comparing
 #   them. scripts/tier.sh resolves core's file at run time -- $FS_CORE_ROOT,
-#   then ../rust-fs-core, then wherever cargo says am-fs-core is -- verifies
+#   then ../rust-fs-core, then wherever cargo says rust-fs-core is -- verifies
 #   it by asking for `--version`, and copies it into tmp/ for the run only.
 #   Anything else is a refusal, not a fallback; the header of scripts/tier.sh
 #   says why, and tests/output_budget.rs holds the resolver to it.
@@ -109,9 +109,9 @@ chore_min_version: 0.6.0
 #   both.
 vars:
   TRIPLE: aarch64-apple-darwin
-  # `[package].name` is am-img-vhdx; `[lib].name` is vhdx, so cargo writes
-  # libvhdx.a. The header mirrors the lib name, not the package name.
-  LIBNAME: vhdx
+  # `[package].name` is rust-img-vhdx; `[lib].name` is vhdx, so cargo writes
+  # libimg_vhdx.a. The header mirrors the lib name, not the package name.
+  LIBNAME: img_vhdx
 
 tasks:
   staticlib:
@@ -332,7 +332,7 @@ tasks:
     #
     # IT PRINTS A DIRECTORY, NOT A FILE, and that is the one place this differs
     # from rust-blk-probe's `artifact`. That crate produces a single binary, so
-    # it can name a file. This one produces libvhdx.a AND the headers beside it,
+    # it can name a file. This one produces libimg_vhdx.a AND the headers beside it,
     # so there is no single path to name — A CONSUMER COPIES THE CONTENTS of
     # what this prints. A consumer that treats it as a file path will silently
     # copy the wrong thing.
