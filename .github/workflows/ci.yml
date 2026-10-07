@@ -143,6 +143,13 @@ jobs:
         with:
           toolchain: 1.95.0
       - uses: Swatinem/rust-cache@v2
+      - name: build --release
+        # OUTSIDE THE BUDGET, so a cold cache's `Downloaded` and `Compiling`
+        # lines land here and not in the tier below (#165). `--no-run` builds
+        # exactly what the budgeted run executes, so that run compiles
+        # nothing. `every_budgeted_cargo_test_is_built_before_its_budget_starts`
+        # in tests/ci_profile.rs keeps this step here.
+        run: cargo test --locked --release --all-targets --features cli --no-run
       - name: test --release
         # ITS OWN TIER, NOT THE MATRIX'S, BECAUSE THIS IS A DIFFERENT RUN
         # SELECTION. It builds the same targets today and counts the same
@@ -260,6 +267,12 @@ jobs:
         with:
           toolchain: 1.95.0
       - uses: Swatinem/rust-cache@v2
+      - name: build the qemu cross-validation tests
+        # Outside the budget, so a cold cache's `Downloaded` and `Compiling`
+        # lines land here and not in the tier below (#165): on main run
+        # 37543324641 they were 81 of the tier's 106 lines. The feature gate
+        # means this target is built nowhere else in the workflow.
+        run: cargo test --locked --features qemu-validation --test qemu_validation --no-run
       - name: qemu cross-validation tests
         # THE FLOOR THIS REPOSITORY NEEDS MOST, AND THE SMALLEST ONE. This
         # run is doubly selective -- one integration target named on the
