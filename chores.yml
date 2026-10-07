@@ -49,16 +49,19 @@ chore_min_version: 0.6.0
 #                                              so no `Compiling` lines land
 #                                              here
 #     release    427 / 26,418    480 / 31,000  ~11% / ~15%: the same selection
-#                                              in the other profile. The job
-#                                              has no separate build step, so
-#                                              a cold cache puts ~40
-#                                              `Compiling` lines in this tier
-#                                              too
-#     qemu        23 /  1,280    120 /  9,000  15 cross-validated images, plus
-#                                              the cold-cache compile of a
-#                                              target nothing else builds --
-#                                              the feature gate keeps it out
-#                                              of `--all-targets`
+#                                              in the other profile. A build
+#                                              step before the tier
+#                                              (`--no-run`) keeps a cold
+#                                              cache's `Compiling` lines out
+#                                              of it (#165); warm on main run
+#                                              37543324641 it was 384 / 24,628
+#     qemu        23 /  1,280    120 /  9,000  15 cross-validated images. A
+#                                              build step before the tier
+#                                              compiles the target, which the
+#                                              feature gate keeps out of
+#                                              `--all-targets` (#165); main
+#                                              run 37543324641 printed 25
+#                                              lines net of 81 cargo lines
 #     cli         26 /    860     35 /  1,300  the installed tool: one line
 #                                              per test file and its verdict,
 #                                              and doctor's report. Paths are
@@ -244,6 +247,7 @@ tasks:
     # computation passes the debug run for the WRONG reason. See the note
     # on the `test-release` job in .github/workflows/ci.yml.
     cmds:
+      - 'cargo test --locked --release --all-targets --features cli --no-run'
       - 'bash ../rust-fs-core/scripts/tier.sh "test (release)" release 480 31000 -- cargo test --locked --release --all-targets --features cli'
       - 'bash ../rust-fs-core/scripts/test-floor.sh release 235'
 
@@ -254,6 +258,7 @@ tasks:
     # halves fail open, which is why it carries the floor this repository
     # needs most.
     cmds:
+      - 'cargo test --locked --features qemu-validation --test qemu_validation --no-run'
       - 'bash ../rust-fs-core/scripts/tier.sh qemu-validation qemu 120 9000 -- cargo test --locked --features qemu-validation --test qemu_validation'
       - 'bash ../rust-fs-core/scripts/test-floor.sh qemu 13'
 
