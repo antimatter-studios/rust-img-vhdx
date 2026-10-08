@@ -7,37 +7,16 @@ linked.
 
 ## Status
 
-- [x] File identifier verification ("vhdxfile")
-- [x] Header (4 KiB) with CRC-32C validation; picks the higher
-      `sequence_number`, two-slot rotation on rewrite.
-- [x] Region table (lookup of well-known BAT and Metadata regions).
-- [x] Metadata (file parameters, virtual disk size, logical sector size).
-- [x] BAT walking with chunk-ratio aware decoding (data + sector-bitmap
-      entry interleave).
-- [x] `BlockRead + BlockDevice` impls via `rust-fs-core`.
-- [x] Device-backed reader — opens on top of any
-      `Arc<dyn fs_core::BlockDevice>` (file, FSKit block resource,
-      slice, callback-backed device).
-- [x] C ABI: `vhdx_open` / `vhdx_open_rw` / `vhdx_open_on_device` /
-      `vhdx_open_rw_on_device`, all returning a generic
-      `FsCoreDevice` handle.
-- [x] Log replay against dirty images. RO opens replay in place when
-      the underlying device is writable; non-writable backing with a
-      non-empty log is reported as `ReadOnly` rather than silently
-      serving stale data zones.
-- [x] Write path. Allocates fresh blocks at the device tail for
-      unallocated / zero / unmapped BAT entries, writes through to
-      allocated blocks otherwise, and refuses partially-present ones.
-      Where the log region can hold the entry, BAT mutations are
-      journalled through the log first (one-descriptor entry per
-      sector) so a crash mid-write is recoverable on next open; an
-      absent or too-small log region publishes the BAT entry
-      unjournalled. After
-      the BAT is published the active header is rotated to the other
-      slot with a fresh `file_write_guid` per the spec.
-- [ ] PartiallyPresent blocks (sector bitmap walking) — reads and
-      writes touching one are refused as unsupported.
-- [ ] Differencing chains (parent locator metadata + chain walk).
+Reads VHDX images: both headers with CRC-32C, the region table, metadata, and
+a chunk-ratio aware BAT, replaying a dirty log first (in place on a writable
+device, refused as `ReadOnly` on one that cannot be written). Writes allocate
+blocks at the device's tail and journal the BAT through the log, then rotate
+the header. Partially present blocks and differencing images are refused by
+name, as are unknown Required regions and metadata items. Every shape is
+checked against `qemu-img`. **[docs/features.md](docs/features.md) is the full
+list**: every feature, its state (supported, partial, refused, not supported or
+upcoming), the release it shipped in, its tracking issue and the test that
+checks it. Every pull request that changes behaviour updates it.
 
 ## Command line
 
