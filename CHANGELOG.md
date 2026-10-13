@@ -5,6 +5,9 @@ Notable changes to `rust-img-vhdx` (published as `am-img-vhdx` until its last ve
 never does.
 
 
+Changes not yet released are fragments in [`changelog.d/`](changelog.d/), one per
+pull request; a release gathers them into a section here.
+
 ## [Unreleased]
 
 ## [0.6.1] — 2026-10-11
