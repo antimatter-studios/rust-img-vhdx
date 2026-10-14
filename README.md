@@ -1,9 +1,11 @@
-# vhdx
+# rust-img-vhdx
 
 Pure-Rust reader/writer for the VHDX virtual-disk format — VHD's modern
 successor, used by Hyper-V and WSL2 on Windows. Spec implemented from
 Microsoft's published format documentation; no GPL code is copied or
 linked.
+
+Published on crates.io as `rust-img-vhdx`; the library name is `img_vhdx`.
 
 ## Status
 
