@@ -8,6 +8,9 @@ on:
   # decides whether they land. The queue reads ci-ok only from a workflow
   # that triggers here.
   merge_group:
+  # A manual run on any branch is a full run: the way to get full-suite and
+  # oracle evidence for a pull request before it is queued.
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -33,6 +36,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       code: ${{ steps.c.outputs.code }}
+      profile: ${{ steps.c.outputs.profile }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -75,8 +79,17 @@ jobs:
           else
             code=true
           fi
-          echo "code=$code ($EVENT${range:+ $range})"
-          echo "code=$code" >> "$GITHUB_OUTPUT"
+          # THE PROFILE (scripts/ci-plan.sh). A pull request gets the quick
+          # profile: the jobs that always run (unit, fmt and its script
+          # tests, semver, cli, standalone). Every other event -- the merge queue, a push to main, a
+          # manual dispatch, and any event not named there -- gets the full
+          # profile. `code` then means what this job's name asks: does this
+          # run need the full pipeline. It stays the one value the
+          # path-gated jobs read, so their `if:` keeps the single shape
+          # ci-gate.sh accepts.
+          plan="$(bash scripts/ci-plan.sh "$EVENT" "$code")"
+          echo "$plan ($EVENT${range:+ $range})"
+          echo "$plan" >> "$GITHUB_OUTPUT"
 
   test:
     name: test / ${{ matrix.os }}
@@ -293,6 +306,9 @@ jobs:
       # pull request without having run. Every guard runs even after one fails,
       # and the floor makes a glob that matched nothing a failure, not a pass.
       # tests/ci_profile.rs holds this loop and its floor in place.
+      # test-ci-profile.sh drives ci-verdict.sh, which reads `needs` with jq.
+      - name: install jq (for the CI profile script test)
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq jq
       - name: script tests (tests/scripts/*.sh, by glob)
         shell: bash
         run: |
@@ -306,7 +322,8 @@ jobs:
           done
           # 2: test-package-cli.sh moved to rust-fs-core with the script it
           # tested (tests/package_cli.rs there), so one guard fewer is here.
-          floor=2
+          # 3: test-ci-profile.sh, the CI profile's truth table.
+          floor=3
           echo "ran $ran script tests, $failed failed (floor $floor)"
           [ "$failed" -eq 0 ] || exit 1
           [ "$ran" -ge "$floor" ] || { echo "::error::ran $ran script tests, floor is $floor"; exit 1; }
@@ -408,6 +425,9 @@ jobs:
   # tests/ci_profile.rs holds the two files to.
   cli:
     name: cli (the installed tool, on PATH)
+    # Every event, unconditionally, as before the quick profile: a change to
+    # documentation alone still runs it on the full path. ci-gate.sh accepts
+    # one path gate, `code`, and that one skips on documentation alone.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -469,6 +489,7 @@ jobs:
   # it. A dependency on the sibling fails here before it reaches a user.
   standalone:
     name: standalone (a checkout with no sibling builds, ${{ matrix.os }})
+    # Every event, unconditionally, for the same reason as `cli`.
     strategy:
       fail-fast: false
       matrix:
@@ -530,6 +551,45 @@ jobs:
   # tests/ci_aggregate_gate.rs holds both halves of this: every job in
   # this file has to appear in `needs`, and .github-guard has to require
   # `ci-ok` and nothing else.
+  # THE QUICK PROFILE'S UNIT TIER. Runs on every event, so a pull request
+  # gets the library's unit tests in a debug build -- overflow-checks on, and
+  # EXPECT_OVERFLOW_CHECKS arming the probe in src/lib.rs -- plus the
+  # workflow guards in tests/ci_profile.rs. The budget is the debug tier's
+  # measured 440 lines / 30000 bytes: this runs a strict subset of that tier.
+  # The floor: run 38767583470 (ffef98f) executed 193 (74 library, 119
+  # ci_profile); 174 is a tenth below. It moves up with the suite, never down.
+  unit:
+    name: unit (debug, library and CI guards)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: clone rust-fs-core sibling
+        shell: bash
+        run: |
+          git clone --depth 1 --branch v0.3.11 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.95.0
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: build the unit tier
+        run: cargo test --locked --lib --test ci_profile --no-run
+      - name: unit tests (debug)
+        shell: bash
+        run: |
+          bash ../rust-fs-core/scripts/tier.sh "unit (debug)" unit 440 30000 -- cargo test --locked --lib --test ci_profile
+          bash ../rust-fs-core/scripts/test-floor.sh unit 174
+        env:
+          EXPECT_OVERFLOW_CHECKS: "1"
+      - name: clippy
+        run: cargo clippy --locked --all-targets --features cli -- -D warnings
+      - name: keep the tier log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tier-logs-unit
+          path: tmp/logs/
+
   semver:
     # `chore check:semver`, spelled out because CI here does not install chore: this tree's public API against the newest
     # version on crates.io, refusing a break the version in Cargo.toml does
@@ -564,26 +624,25 @@ jobs:
 
   ci-ok:
     name: ci-ok
-    needs: [changes, test, test-release, fmt, qemu-validation, cli, semver, standalone]
+    needs: [changes, test, test-release, fmt, qemu-validation, cli, semver, standalone, unit]
     if: always()
     runs-on: ubuntu-latest
     steps:
+      # The verdict is scripts/ci-verdict.sh, so the checkout comes first and
+      # jq, which it reads `needs` with, is provisioned explicitly.
+      - uses: actions/checkout@v4
+      - name: install jq
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq jq
       - name: every gating job must have concluded success
-        # `toJSON(needs)` rather than a line per job: the script then says
-        # nothing about which jobs exist, so adding one to `needs:` above
-        # is the whole edit and there is no second list to forget.
+        # `toJSON(needs)` rather than a line per job. The verdict names the
+        # jobs it expects, always-run and full-only, and refuses a missing,
+        # unlisted, failed or cancelled one, or a missing or invalid plan. A
+        # full-only job may be skipped only when the plan said it would not
+        # run: the quick profile or a change to documentation alone.
         env:
           NEEDS: ${{ toJSON(needs) }}
-          # false only for a change to documentation alone: then, and only
-          # then, a skipped job is not a failed one.
+          PROFILE: ${{ needs.changes.outputs.profile }}
           CODE: ${{ needs.changes.outputs.code }}
         run: |
           set -euo pipefail
-          echo "$NEEDS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
-          echo "code changed: $CODE"
-          bad="$(echo "$NEEDS" | jq -r --arg code "$CODE" '[to_entries[] | select(.value.result != "success" and ($code != "false" or .value.result != "skipped")) | .key] | join(", ")')"
-          if [ -n "$bad" ]; then
-            echo "::error::not green: $bad (failed, cancelled or skipped)"
-            exit 1
-          fi
-          echo "all gating jobs succeeded"
+          printf '%s' "$NEEDS" | bash scripts/ci-verdict.sh "$PROFILE" "$CODE"
