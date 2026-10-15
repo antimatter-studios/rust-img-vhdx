@@ -80,8 +80,8 @@ jobs:
             code=true
           fi
           # THE PROFILE (scripts/ci-plan.sh). A pull request gets the quick
-          # profile: the cheap unit, fmt, script and semver jobs, which always
-          # run. Every other event -- the merge queue, a push to main, a
+          # profile: the jobs that always run (unit, fmt and its script
+          # tests, semver, cli, standalone). Every other event -- the merge queue, a push to main, a
           # manual dispatch, and any event not named there -- gets the full
           # profile. `code` then means what this job's name asks: does this
           # run need the full pipeline. It stays the one value the
@@ -425,9 +425,9 @@ jobs:
   # tests/ci_profile.rs holds the two files to.
   cli:
     name: cli (the installed tool, on PATH)
-    # Full profile only: the merge queue, main and a manual run (ci-plan.sh).
-    needs: changes
-    if: needs.changes.outputs.code == 'true'
+    # Every event, unconditionally, as before the quick profile: a change to
+    # documentation alone still runs it on the full path. ci-gate.sh accepts
+    # one path gate, `code`, and that one skips on documentation alone.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -489,9 +489,7 @@ jobs:
   # it. A dependency on the sibling fails here before it reaches a user.
   standalone:
     name: standalone (a checkout with no sibling builds, ${{ matrix.os }})
-    # Full profile only: the merge queue, main and a manual run (ci-plan.sh).
-    needs: changes
-    if: needs.changes.outputs.code == 'true'
+    # Every event, unconditionally, for the same reason as `cli`.
     strategy:
       fail-fast: false
       matrix:
@@ -558,6 +556,8 @@ jobs:
   # EXPECT_OVERFLOW_CHECKS arming the probe in src/lib.rs -- plus the
   # workflow guards in tests/ci_profile.rs. The budget is the debug tier's
   # measured 440 lines / 30000 bytes: this runs a strict subset of that tier.
+  # The floor: run 38767583470 (ffef98f) executed 193 (74 library, 119
+  # ci_profile); 174 is a tenth below. It moves up with the suite, never down.
   unit:
     name: unit (debug, library and CI guards)
     runs-on: ubuntu-latest
@@ -578,6 +578,7 @@ jobs:
         shell: bash
         run: |
           bash ../rust-fs-core/scripts/tier.sh "unit (debug)" unit 440 30000 -- cargo test --locked --lib --test ci_profile
+          bash ../rust-fs-core/scripts/test-floor.sh unit 174
         env:
           EXPECT_OVERFLOW_CHECKS: "1"
       - name: clippy

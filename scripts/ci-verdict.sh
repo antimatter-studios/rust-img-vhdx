@@ -15,8 +15,10 @@ case "$code" in true|false) ;; *) echo "::error::ci-verdict: invalid plan code '
 if [ "$profile" = quick ] && [ "$code" = true ]; then
   echo "::error::ci-verdict: a quick plan cannot ask for the full pipeline"; exit 1
 fi
-always="changes fmt unit semver"
-full_only="test test-release qemu-validation cli standalone"
+# cli and standalone always run: a change to documentation alone still runs
+# them on the full path, as it did before the quick profile existed.
+always="changes fmt unit semver cli standalone"
+full_only="test test-release qemu-validation"
 needs="$(cat)"
 echo "$needs" | jq -e 'type == "object"' >/dev/null || { echo "::error::ci-verdict: needs is not a JSON object"; exit 1; }
 bad=

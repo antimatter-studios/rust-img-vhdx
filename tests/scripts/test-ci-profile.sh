@@ -32,8 +32,8 @@ bash scripts/ci-plan.sh >/dev/null 2>&1 && fail "plan accepted no arguments" || 
 # needs JSON: always-run jobs, then full-only jobs, each with a result.
 needs() {
   local a="$1" f="$2"
-  printf '{"changes":{"result":"%s"},"fmt":{"result":"%s"},"unit":{"result":"%s"},"semver":{"result":"%s"},' "$a" "$a" "$a" "$a"
-  printf '"test":{"result":"%s"},"test-release":{"result":"%s"},"qemu-validation":{"result":"%s"},"cli":{"result":"%s"},"standalone":{"result":"%s"}}' "$f" "$f" "$f" "$f" "$f"
+  printf '{"changes":{"result":"%s"},"fmt":{"result":"%s"},"unit":{"result":"%s"},"semver":{"result":"%s"},"cli":{"result":"%s"},"standalone":{"result":"%s"},' "$a" "$a" "$a" "$a" "$a" "$a"
+  printf '"test":{"result":"%s"},"test-release":{"result":"%s"},"qemu-validation":{"result":"%s"}}' "$f" "$f" "$f"
 }
 verdict() { printf '%s' "$3" | bash scripts/ci-verdict.sh "$1" "$2" >/dev/null 2>&1; }
 expect_green() { verdict "$1" "$2" "$3" && ok "$4" || fail "$4 (want green)"; }
@@ -58,6 +58,14 @@ expect_red full true '{"changes":{"result":"success"}}' "missing jobs fail"
 expect_red full true "$(needs success success | jq -c 'del(.unit)')" "a missing always-run job fails"
 expect_red full true "$(needs success success | jq -c '. + {"extra":{"result":"success"}}')" "an unlisted job fails"
 expect_red full true "not json" "unparseable needs fails"
+# A change to documentation alone still runs cli and standalone on the full
+# path, as before the quick profile: their skip is never accepted.
+for j in cli standalone; do
+  expect_red full false "$(needs success skipped | jq -c --arg j "$j" '.[$j].result = "skipped"')" "documentation-only full run refuses a skipped $j"
+  expect_red quick false "$(needs success skipped | jq -c --arg j "$j" '.[$j].result = "skipped"')" "quick run refuses a skipped $j"
+  awk -v j="  $j:" '$0 == j {inside=1; next} /^  [a-z-]+:$/ {inside=0} inside && /^    if:/ {found=1} END {exit found}' .github/workflows/ci.yml \
+    && ok "$j carries no job-level if: in ci.yml" || fail "$j carries a job-level if:, so a documentation-only full run skips it"
+done
 
 # The workflow uses both scripts, and ci-ok needs every job the verdict names.
 grep -q 'bash scripts/ci-plan.sh' .github/workflows/ci.yml && ok "ci.yml plans with ci-plan.sh" || fail "ci.yml does not call ci-plan.sh"

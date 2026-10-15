@@ -243,6 +243,15 @@ tasks:
       - 'EXPECT_OVERFLOW_CHECKS=1 bash ../rust-fs-core/scripts/tier.sh "test (debug)" debug 440 30000 -- cargo test --locked --all-targets --features cli'
       - 'bash ../rust-fs-core/scripts/test-floor.sh debug 235'
 
+  test:unit:
+    desc: 'The unit tier of the quick profile: the library and tests/ci_profile.rs in a debug build'
+    # The tier a pull request gates on, with the workflow's budget and floor.
+    # A strict subset of test:debug, so the debug budget covers it. The
+    # floor: 193 executed (74 library, 119 ci_profile), 174 a tenth below.
+    cmds:
+      - 'EXPECT_OVERFLOW_CHECKS=1 bash ../rust-fs-core/scripts/tier.sh "unit (debug)" unit 440 30000 -- cargo test --locked --lib --test ci_profile'
+      - 'bash ../rust-fs-core/scripts/test-floor.sh unit 174'
+
   test:release:
     desc: 'The suite in the profile that ships: no debug_assert!, arithmetic wraps'
     # NOT A DUPLICATE OF test:debug. Debug turns an integer overflow into
