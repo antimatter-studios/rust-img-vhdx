@@ -122,7 +122,7 @@ jobs:
         #
         shell: bash
         run: |
-          git clone --depth 1 --branch v0.3.11 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
+          git clone --depth 1 --branch v0.3.12 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.95.0
@@ -217,7 +217,7 @@ jobs:
         # the `test` job above for why it used to be two.
         shell: bash
         run: |
-          git clone --depth 1 --branch v0.3.11 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
+          git clone --depth 1 --branch v0.3.12 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.95.0
@@ -265,7 +265,7 @@ jobs:
       # the docs step below was added. Same ref as every other job.
       - name: clone rust-fs-core sibling
         shell: bash
-        run: git clone --depth 1 --branch v0.3.11 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
+        run: git clone --depth 1 --branch v0.3.12 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.95.0
@@ -349,7 +349,7 @@ jobs:
         # the `test` job above for why it used to be two.
         shell: bash
         run: |
-          git clone --depth 1 --branch v0.3.11 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
+          git clone --depth 1 --branch v0.3.12 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
       - name: install qemu-utils
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-utils
       - uses: dtolnay/rust-toolchain@stable
@@ -436,7 +436,7 @@ jobs:
         # the `test` job above for why it used to be two.
         shell: bash
         run: |
-          git clone --depth 1 --branch v0.3.11 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
+          git clone --depth 1 --branch v0.3.12 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
       - name: install qemu-utils, jq and man
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-utils jq man-db
       - uses: dtolnay/rust-toolchain@stable
@@ -566,7 +566,7 @@ jobs:
       - name: clone rust-fs-core sibling
         shell: bash
         run: |
-          git clone --depth 1 --branch v0.3.11 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
+          git clone --depth 1 --branch v0.3.12 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.95.0
@@ -610,7 +610,7 @@ jobs:
       - name: clone rust-fs-core sibling
         shell: bash
         run: |
-          git clone --depth 1 --branch v0.3.11 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
+          git clone --depth 1 --branch v0.3.12 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.95.0
