@@ -45,7 +45,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: antimatter-studios/rust-fs-core
-          ref: v0.3.12
+          ref: v0.3.13
           path: rust-fs-core
       - name: Classify the change
         id: c
@@ -122,7 +122,7 @@ jobs:
         #
         shell: bash
         run: |
-          git clone --depth 1 --branch v0.3.12 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
+          git clone --depth 1 --branch v0.3.13 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.95.0
@@ -217,7 +217,7 @@ jobs:
         # the `test` job above for why it used to be two.
         shell: bash
         run: |
-          git clone --depth 1 --branch v0.3.12 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
+          git clone --depth 1 --branch v0.3.13 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.95.0
@@ -265,7 +265,7 @@ jobs:
       # the docs step below was added. Same ref as every other job.
       - name: clone rust-fs-core sibling
         shell: bash
-        run: git clone --depth 1 --branch v0.3.12 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
+        run: git clone --depth 1 --branch v0.3.13 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.95.0
@@ -300,6 +300,11 @@ jobs:
         # agent-core v6: a pull request adds changelog.d/<branch>.md rather
         # than editing CHANGELOG.md. Run directly, like the check above.
         run: bash ../rust-fs-core/scripts/changelog-check.sh
+      - name: unreleased features-page rows are fragments
+        # rust-fs-core's docs/features-fragments.md: a pull request adds
+        # features.d/<branch>.md rather than editing docs/features.md. Run
+        # directly, like the changelog check above.
+        run: bash ../rust-fs-core/scripts/features-check.sh
       # EVERY tests/scripts GUARD, BY GLOB (#143). They were named one step
       # each, so a guard added to that directory never ran until someone also
       # added a step here -- test-write-jobs-pinned.sh went green on its first
@@ -349,7 +354,7 @@ jobs:
         # the `test` job above for why it used to be two.
         shell: bash
         run: |
-          git clone --depth 1 --branch v0.3.12 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
+          git clone --depth 1 --branch v0.3.13 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
       - name: install qemu-utils
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-utils
       - uses: dtolnay/rust-toolchain@stable
@@ -436,7 +441,7 @@ jobs:
         # the `test` job above for why it used to be two.
         shell: bash
         run: |
-          git clone --depth 1 --branch v0.3.12 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
+          git clone --depth 1 --branch v0.3.13 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
       - name: install qemu-utils, jq and man
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends qemu-utils jq man-db
       - uses: dtolnay/rust-toolchain@stable
@@ -566,7 +571,7 @@ jobs:
       - name: clone rust-fs-core sibling
         shell: bash
         run: |
-          git clone --depth 1 --branch v0.3.12 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
+          git clone --depth 1 --branch v0.3.13 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.95.0
@@ -610,7 +615,7 @@ jobs:
       - name: clone rust-fs-core sibling
         shell: bash
         run: |
-          git clone --depth 1 --branch v0.3.12 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
+          git clone --depth 1 --branch v0.3.13 https://github.com/antimatter-studios/rust-fs-core.git ../rust-fs-core
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.95.0
